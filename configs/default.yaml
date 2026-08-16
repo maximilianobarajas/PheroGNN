@@ -1,0 +1,46 @@
+experiment:
+  datasets: [synthetic, cora, citeseer, pubmed]
+  models: [gcn, gat, graphsage, pherognn]
+  seeds: [0, 1, 2, 3, 4]
+  epochs: 400
+  patience: 60
+  selection_metric: macro_f1
+
+model:
+  hidden_channels: 64
+  dropout: 0.5
+  learning_rate: 0.01
+  weight_decay: 0.0005
+
+pheromone:
+  tau0: 1.0
+  tau_min: 0.05
+  tau_max: 5.0
+  memory_dim: 8
+  gate_hidden: 16
+  gate_mlp_hidden: 32
+  max_alpha: 0.5
+  min_edge_scale: 0.25
+  max_edge_scale: 1.75
+  learning_rate: 0.005
+  tau_l1: 0.00001
+  gradient_clip: 5.0
+
+synthetic:
+  num_legit: 420
+  num_fraud: 80
+  num_features: 16
+  train_ratio: 0.60
+  val_ratio: 0.20
+
+planetoid:
+  root: data/planetoid
+  use_public_split: true
+
+elliptic:
+  directory: data/elliptic
+  make_undirected: true
+  temporal_split: true
+
+output:
+  directory: results
