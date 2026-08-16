@@ -1,0 +1,50 @@
+\subsection{Experimental Design}
+
+The experimental protocol was designed to evaluate three aspects of the proposed method: predictive performance, the specific contribution of persistent edge memory, and the structural information encoded by the learned pheromone graph. All model-selection decisions were made exclusively on the validation partition, while the test partition was used only once after early stopping.
+
+\subsubsection{Datasets}
+
+Four benchmark groups were considered. First, a controlled synthetic transaction graph was generated with legitimate communities, fraudulent chains, fraud--fraud interactions, and bridge edges connecting illicit and legitimate regions. The synthetic graph contains 500 nodes, of which 80 correspond to the minority class, and is used to inspect whether the learned pheromone values recover planted task-relevant pathways.
+
+Second, the Cora, CiteSeer, and PubMed citation networks were included to determine whether persistent edge memory generalizes beyond financial graphs. Node features and labels follow the standard Planetoid representation. Unless otherwise stated, the public data splits are retained to facilitate comparison with prior work.
+
+Third, the Elliptic Bitcoin transaction graph is used as the real-world financial-forensics benchmark. Transactions with unknown labels remain in the graph as relational context but are excluded from the supervised loss and evaluation metrics. To reduce temporal leakage, the primary Elliptic protocol uses a chronological partition: time steps 1--34 for training, 35--41 for validation, and 42--49 for testing.
+
+\subsubsection{Compared Methods}
+
+PheroGNN is compared with three established message-passing architectures: GCN, GAT, and GraphSAGE. All neural models use two graph-learning layers, the same hidden dimensionality, dropout probability, optimizer, maximum number of epochs, and early-stopping criterion. This controlled configuration isolates the effect of the message-passing mechanism rather than differences in model capacity or training budget.
+
+For PheroGNN, each observed edge is initialized with pheromone value $\tau_0$. During training, pheromones are locally normalized over incoming edges, used to modulate messages, evaporated at rate $\rho$, and reinforced according to the correctness-based reward defined in Section~\ref{sec:pheromone-reinforcement}.
+
+\subsubsection{Ablation Study}
+
+The contribution of the pheromone mechanism is evaluated through six variants:
+\begin{enumerate}
+    \item \textbf{Full PheroGNN}: persistent pheromones with evaporation and reinforcement;
+    \item \textbf{No evaporation}: $\rho=0$;
+    \item \textbf{No reinforcement}: $\eta_\tau=0$;
+    \item \textbf{Random initialization}: persistent pheromones initialized randomly;
+    \item \textbf{Random at each epoch}: edge weights are randomized rather than accumulated;
+    \item \textbf{No persistence}: pheromones are reset to a uniform state before every update.
+\end{enumerate}
+The last two variants are particularly important because they distinguish persistent historical memory from generic stochastic edge weighting.
+
+\subsubsection{Training Protocol and Hyperparameters}
+
+Each configuration is executed using five independent random seeds. Models are trained with Adam, an initial learning rate of $0.01$, weight decay of $5\times10^{-4}$, hidden dimension of 64, and dropout of 0.5. Training is limited to 400 epochs with early stopping after 60 epochs without improvement in validation Macro-F1. The best validation checkpoint is restored before test evaluation. PheroGNN uses $\tau_0=1.0$, $\tau_{\min}=0.05$, $\tau_{\max}=5.0$, evaporation rate $\rho=0.05$, and reinforcement rate $\eta_\tau=0.08$. These values are fixed across datasets in the main comparison; dataset-specific tuning, when reported, is performed using only the validation partition.
+
+\subsubsection{Evaluation Metrics}
+
+For multiclass citation networks, the primary metric is Macro-F1, complemented by accuracy, macro-precision, macro-recall, and balanced accuracy. For binary fraud-detection tasks, the primary metrics are minority-class F1 and PR-AUC because accuracy and ROC-AUC may be overly optimistic under class imbalance. Precision, recall, balanced accuracy, and ROC-AUC are also reported.
+
+Results are presented as mean $\pm$ standard deviation over five seeds. Paired comparisons between PheroGNN and each neural baseline use the Wilcoxon signed-rank test across matched seeds. Holm's correction is applied within each family of comparisons, and adjusted $p<0.05$ is considered statistically significant.
+
+\subsubsection{Interpretability and Network Analysis}
+
+After training, the final pheromone values define a weighted directed graph $G_\tau$. For each node, incoming, outgoing, and total pheromone strengths are computed. These task-specific scores are compared with degree, betweenness, closeness, eigenvector centrality, PageRank, and weighted PageRank using Pearson and Spearman correlations.
+
+Three complementary visual analyses are generated: the distribution of final edge pheromones, learning trajectories across epochs, and graph visualizations in which edge width is proportional to learned pheromone. Weak correlation with classical centrality accompanied by improved predictive performance is interpreted as evidence that PheroGNN captures task-specific pathways that are not reducible to generic topology.
+
+\subsubsection{Reproducibility}
+
+The accompanying implementation stores the configuration, per-epoch histories, test metrics for every seed, final pheromone values, node-level network measures, statistical comparisons, publication-ready tables, and vector figures. No result is manually transcribed into the manuscript; all tables and figures are generated directly from the experiment outputs.

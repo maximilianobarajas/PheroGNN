@@ -39,43 +39,14 @@ def metrics(logits, y, mask, num_classes):
     return result
 
 
-def _build_optimizer(model, model_cfg, pheromone_cfg):
-    base_lr = float(model_cfg["learning_rate"])
-    weight_decay = float(model_cfg["weight_decay"])
-
-    if not isinstance(model, PheroGNN):
-        return torch.optim.Adam(model.parameters(), lr=base_lr, weight_decay=weight_decay)
-
-    tau_lr = float(pheromone_cfg.get("learning_rate", base_lr * 0.5))
-    tau_ids = {id(model.tau_raw)}
-    network_parameters = [p for p in model.parameters() if id(p) not in tau_ids]
-
-    return torch.optim.Adam([
-        {"params": network_parameters, "lr": base_lr, "weight_decay": weight_decay},
-        {"params": [model.tau_raw], "lr": tau_lr, "weight_decay": 0.0},
-    ])
-
-
-def _pheromone_statistics(model):
-    tau = model.tau.detach()
-    result = dict(
-        tau_mean=tau.mean().item(),
-        tau_std=tau.std(unbiased=False).item(),
-        tau_min=tau.min().item(),
-        tau_max=tau.max().item(),
-    )
-    result.update(model.gate_statistics())
-    return result
-
-
 def train_one(model, data, cfg):
     model_cfg = cfg["model"]
     experiment_cfg = cfg["experiment"]
-    pheromone_cfg = cfg.get("pheromone", {})
+    gradient_clip = cfg.get("pheromone", {}).get("gradient_clip", 5.0)
 
-    optimizer = _build_optimizer(model, model_cfg, pheromone_cfg)
-    tau_l1 = float(pheromone_cfg.get("tau_l1", 1e-5))
-    gradient_clip = pheromone_cfg.get("gradient_clip", 5.0)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=float(model_cfg["learning_rate"]), weight_decay=float(model_cfg["weight_decay"])
+    )
 
     best_score = -np.inf
     best_state = None
@@ -89,21 +60,19 @@ def train_one(model, data, cfg):
         optimizer.zero_grad(set_to_none=True)
 
         logits = model(data.x, data.edge_index)
-        classification_loss = F.cross_entropy(logits[data.train_mask], data.y[data.train_mask])
-
-        tau_loss = classification_loss.new_zeros(())
-        if isinstance(model, PheroGNN) and tau_l1 > 0:
-            tau_loss = tau_l1 * model.pheromone_regularization()
-
-        loss = classification_loss + tau_loss
+        loss = F.cross_entropy(logits[data.train_mask], data.y[data.train_mask])
         loss.backward()
 
         if gradient_clip:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(gradient_clip))
 
         optimizer.step()
+
         if isinstance(model, PheroGNN):
-            model.clamp_pheromones_()
+            model.eval()
+            with torch.no_grad():
+                reward_logits = model(data.x, data.edge_index)
+            model.update_pheromones(reward_logits, data.y, data.train_mask, data.edge_index)
 
         model.eval()
         with torch.no_grad():
@@ -119,7 +88,7 @@ def train_one(model, data, cfg):
             **{f"test_{k}": v for k, v in test.items()},
         }
         if isinstance(model, PheroGNN):
-            epoch_record.update(_pheromone_statistics(model))
+            epoch_record.update(model.pheromone_statistics())
         history.append(epoch_record)
 
         score = validation[experiment_cfg["selection_metric"]]
@@ -143,6 +112,6 @@ def train_one(model, data, cfg):
     final["best_epoch"] = best_epoch
     final["runtime_seconds"] = time.perf_counter() - start_time
     if isinstance(model, PheroGNN):
-        final.update(_pheromone_statistics(model))
+        final.update(model.pheromone_statistics())
 
     return model, pd.DataFrame(history), final
