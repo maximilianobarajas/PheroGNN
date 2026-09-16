@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy.stats import pearsonr, spearmanr
-from .models import PheroGNN
+from .models import PheroGNN, PheroGNNv7
+
+PHERO_MODELS = (PheroGNN, PheroGNNv7)
 
 
 def edge_table(model, data):
-    if not isinstance(model, PheroGNN):
-        raise TypeError("Interpretability requires PheroGNN.")
+    if not isinstance(model, PHERO_MODELS):
+        raise TypeError("Interpretability requires a PheroGNN model.")
 
     src, dst = data.edge_index.detach().cpu().numpy()
-    tau = model.tau.detach().cpu().numpy()
+    tau = model.effective_tau().detach().cpu().numpy()
 
     return pd.DataFrame({"source": src, "target": dst, "pheromone": tau})
 

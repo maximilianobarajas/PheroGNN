@@ -1,6 +1,7 @@
 experiment:
   datasets: [synthetic, cora, citeseer, pubmed]
-  models: [gcn, gat, graphsage, pherognn, pherognn_select]
+  models: [gcn, gat, graphsage, pherognn, pherognn_v7_heuristic, pherognn_v7_dual,
+           pherognn_v7_hetero, pherognn_v7_gate, pherognn_v7_dropedge, pherognn_v7_full]
   seeds: [0, 1, 2, 3, 4]
   epochs: 400
   patience: 60
@@ -32,7 +33,7 @@ pheromone_v7:
   credit_decay: 0.5
   gradient_clip: 5.0
   alpha: 1.0
-  beta: 0.5
+  beta: 1.0
   gate_hidden: 16
   dropedge_base_p: 0.15
   dropedge_layer_growth: 0.5
@@ -54,4 +55,4 @@ elliptic:
   temporal_split: true
 
 output:
-  directory: results
+  directory: results_ablation_v7b

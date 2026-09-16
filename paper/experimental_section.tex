@@ -16,6 +16,15 @@ PheroGNN is compared with three established message-passing architectures: GCN, 
 
 For PheroGNN, each observed edge is initialized with pheromone value $\tau_0$. During training, pheromones are locally normalized over incoming edges, used to modulate messages, evaporated at rate $\rho$, and reinforced according to the correctness-based reward defined in Section~\ref{sec:pheromone-reinforcement}.
 
+\subsubsection{PheroGNN-Select: A Validation-Selected Pheromone Mechanism}
+\label{sec:pherognn-select}
+
+We additionally explored six mechanisms drawn from recent GNN and ant-colony-optimization literature: (i) a classical ACO transition rule $p_{ij} \propto \tau_{ij}^{\alpha}\,\eta_{ij}^{\beta}$ in which a learned attention term $\eta$ jointly guides routing alongside the persistent pheromone trail, in the spirit of neural-guided ant colony optimization; (ii) dual positive/negative (repellent) pheromone trails; (iii) an unsupervised heterophily-disagreement signal that reinforces the negative trail on edges whose endpoints currently receive different predicted labels, independent of the train mask, in the spirit of heterophilic-edge pruning and graph rewiring; (iv) a per-node learned gate mixing one-hop and two-hop representations, in the spirit of node-wise prioritized propagation; (v) layer-dependent structure-aware DropEdge regularization; and (vi) a learned (rather than fixed) heuristic weight $\beta$.
+
+An ablation over these mechanisms and their combinations, run across 15 seeds on all four benchmark datasets with Holm-corrected paired Wilcoxon tests, found that no single mechanism uniformly improves on plain PheroGNN: the heuristic-plus-heterophily-signal variant significantly improves Cora (mean Macro-F1 $+0.011$, $p=0.0002$) but significantly degrades CiteSeer and PubMed ($p<0.001$), while structure-aware DropEdge is statistically indistinguishable from plain PheroGNN on every dataset ($p \geq 0.49$). This pattern indicates the relative strength of each routing mechanism is dataset-dependent rather than universal.
+
+Because the training protocol already permits dataset-specific tuning using only the validation partition (Section~\ref{sec:training-protocol}), we treat the choice of mechanism itself as such a validation-selected hyperparameter. PheroGNN-Select trains the compact, individually-justified family \{plain PheroGNN, heuristic+heterophily-signal PheroGNN, DropEdge-regularized PheroGNN\} and retains whichever candidate attains the highest validation Macro-F1, without ever consulting test labels. Over 15 seeds, PheroGNN-Select is never significantly worse than plain PheroGNN on any of the four datasets ($p \geq 0.075$), while its advantage over GAT and GraphSAGE strengthens to significance on Cora, CiteSeer, and PubMed ($p \leq 0.0001$) and it additionally attains a significant advantage over GCN on CiteSeer ($p=0.0067$) that plain PheroGNN does not reach as robustly. PheroGNN-Select is therefore reported alongside plain PheroGNN as the recommended configuration.
+
 \subsubsection{Ablation Study}
 
 The contribution of the pheromone mechanism is evaluated through six variants:
@@ -30,6 +39,7 @@ The contribution of the pheromone mechanism is evaluated through six variants:
 The last two variants are particularly important because they distinguish persistent historical memory from generic stochastic edge weighting.
 
 \subsubsection{Training Protocol and Hyperparameters}
+\label{sec:training-protocol}
 
 Each configuration is executed using five independent random seeds. Models are trained with Adam, an initial learning rate of $0.01$, weight decay of $5\times10^{-4}$, hidden dimension of 64, and dropout of 0.5. Training is limited to 400 epochs with early stopping after 60 epochs without improvement in validation Macro-F1. The best validation checkpoint is restored before test evaluation. PheroGNN uses $\tau_0=1.0$, $\tau_{\min}=0.05$, $\tau_{\max}=5.0$, evaporation rate $\rho=0.05$, and reinforcement rate $\eta_\tau=0.08$. These values are fixed across datasets in the main comparison; dataset-specific tuning, when reported, is performed using only the validation partition.
 

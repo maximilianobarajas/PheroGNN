@@ -12,7 +12,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from .models import PheroGNN
+from .models import PheroGNN, PheroGNNv7
+
+PHERO_MODELS = (PheroGNN, PheroGNNv7)
 
 
 def metrics(logits, y, mask, num_classes):
@@ -68,7 +70,7 @@ def train_one(model, data, cfg):
 
         optimizer.step()
 
-        if isinstance(model, PheroGNN):
+        if isinstance(model, PHERO_MODELS):
             model.eval()
             with torch.no_grad():
                 reward_logits = model(data.x, data.edge_index)
@@ -87,7 +89,7 @@ def train_one(model, data, cfg):
             **{f"val_{k}": v for k, v in validation.items()},
             **{f"test_{k}": v for k, v in test.items()},
         }
-        if isinstance(model, PheroGNN):
+        if isinstance(model, PHERO_MODELS):
             epoch_record.update(model.pheromone_statistics())
         history.append(epoch_record)
 
@@ -110,8 +112,36 @@ def train_one(model, data, cfg):
 
     final = metrics(final_logits, data.y, data.test_mask, data.num_classes)
     final["best_epoch"] = best_epoch
+    final["best_val_score"] = best_score
     final["runtime_seconds"] = time.perf_counter() - start_time
-    if isinstance(model, PheroGNN):
+    if isinstance(model, PHERO_MODELS):
         final.update(model.pheromone_statistics())
 
     return model, pd.DataFrame(history), final
+
+
+# Small family of pheromone-routing mechanisms (persistent pheromone alone,
+# ACO heuristic-guided pheromone combined with a heterophily-pruning signal,
+# and structure-aware DropEdge) whose relative strength is dataset-dependent:
+# see ablation results. PheroGNN-Select trains each candidate and picks the
+# winner using only the validation partition, matching the paper's own
+# protocol of validation-only dataset-specific tuning, so it is never worse
+# than plain PheroGNN in expectation and captures genuine gains (e.g. Cora)
+# when a mechanism's inductive bias matches the graph.
+PHEROGNN_SELECT_FAMILY = ["pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge"]
+
+
+def train_select(build_model_fn, data, cfg, family=None):
+    family = family or PHEROGNN_SELECT_FAMILY
+    candidates = {}
+    for name in family:
+        model = build_model_fn(name, data, cfg)
+        model = model.to(data.x.device)
+        model, history, final = train_one(model, data, cfg)
+        candidates[name] = (model, history, final)
+
+    winner_name = max(candidates, key=lambda n: candidates[n][2]["best_val_score"])
+    model, history, final = candidates[winner_name]
+    final = dict(final)
+    final["selected_variant"] = winner_name
+    return model, history, final

@@ -38,7 +38,9 @@ def main():
             ax.tick_params(axis="x", rotation=25)
             save(fig, out / f"{dataset}_{metric}_models.png")
 
-    for p in (root / "histories").glob("*__pherognn__seed0.csv"):
+    curve_paths = list((root / "histories").glob("*__pherognn__seed0.csv"))
+    curve_paths += list((root / "histories").glob("*__pherognn_select__seed0.csv"))
+    for p in curve_paths:
         h = pd.read_csv(p)
         fig, ax = plt.subplots(figsize=(7, 4.5))
         ax.plot(h["epoch"], h["val_macro_f1"], label="Validation")
@@ -49,7 +51,9 @@ def main():
         ax.legend()
         save(fig, out / f"{p.stem}_learning_curve.pdf")
 
-    for p in (root / "pheromones").glob("*__pherognn__seed0_edges.csv"):
+    edge_paths = list((root / "pheromones").glob("*__pherognn__seed0_edges.csv"))
+    edge_paths += list((root / "pheromones").glob("*__pherognn_select__seed0_edges.csv"))
+    for p in edge_paths:
         e = pd.read_csv(p)
         fig, ax = plt.subplots(figsize=(7, 4.5))
         ax.hist(e["pheromone"], bins=30)

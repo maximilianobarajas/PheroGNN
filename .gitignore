@@ -5,4 +5,5 @@ venv/
 data/planetoid/
 data/elliptic/*.csv
 results/
+results_*/
 *.pt
