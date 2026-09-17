@@ -3,7 +3,7 @@ from typing import Dict
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv, GCNConv, MessagePassing, SAGEConv
+from torch_geometric.nn import APPNP, GATConv, GCNConv, MessagePassing, SAGEConv
 from torch_geometric.utils import add_remaining_self_loops, scatter
 from torch_geometric.utils import softmax as scatter_softmax
 
@@ -380,6 +380,85 @@ class PheroGNNv7(nn.Module):
         }
 
 
+class PheroAPPNP(nn.Module):
+    """Decouples feature transformation from propagation (Predict-then-Propagate
+    / APPNP): a shallow 2-layer MLP produces an initial prediction, which is
+    then diffused K hops through the persistent-pheromone-weighted graph with
+    a teleport back to the initial prediction at every hop. This lets the
+    model use a much larger receptive field than plain 2-layer PheroGNN
+    without adding learnable graph layers (and therefore without the
+    oversmoothing/overfitting risk of stacking more message-passing layers),
+    while the pheromone trail governing that diffusion is still updated by
+    the same evaporate/reinforce ant-colony dynamics as PheroGNN v6.
+    """
+
+    def __init__(self, in_dim, hidden, out_dim, dropout, num_edges,
+                 tau0=1.0, tau_min=0.05, tau_max=5.0,
+                 evaporation_rate=0.08, reinforcement_rate=0.35,
+                 credit_hops=1, credit_decay=0.5,
+                 K=10, appnp_alpha=0.1, tau_eps=1e-8):
+        super().__init__()
+        self.lin1 = nn.Linear(in_dim, hidden)
+        self.lin2 = nn.Linear(hidden, out_dim)
+        self.dropout = float(dropout)
+        self.prop = APPNP(K=int(K), alpha=float(appnp_alpha), cached=False,
+                           add_self_loops=True, normalize=True)
+
+        self.tau0 = float(tau0)
+        self.tau_min = float(tau_min)
+        self.tau_max = float(tau_max)
+        self.evaporation_rate = float(evaporation_rate)
+        self.reinforcement_rate = float(reinforcement_rate)
+        self.credit_hops = int(credit_hops)
+        self.credit_decay = float(credit_decay)
+        self.tau_eps = float(tau_eps)
+
+        self.register_buffer("tau", torch.full((num_edges,), self.tau0))
+
+    def effective_tau(self):
+        return self.tau
+
+    def forward(self, x, edge_index):
+        h = F.relu(self.lin1(x))
+        h = F.dropout(h, self.dropout, self.training)
+        h = self.lin2(h)
+        h = F.dropout(h, self.dropout, self.training)
+        return self.prop(h, edge_index, edge_weight=self.tau)
+
+    @torch.no_grad()
+    def update_pheromones(self, logits, y, train_mask, edge_index):
+        if self.evaporation_rate > 0:
+            self.tau.mul_(1.0 - self.evaporation_rate).add_(self.evaporation_rate * self.tau0)
+
+        if self.reinforcement_rate > 0:
+            probs = torch.softmax(logits, dim=-1)
+            safe_y = y.clamp_min(0)
+            true_prob = probs.gather(1, safe_y.unsqueeze(1)).squeeze(1)
+            reward_node = torch.zeros(logits.size(0), device=logits.device, dtype=self.tau.dtype)
+            reward_node[train_mask] = 2.0 * true_prob[train_mask] - 1.0
+
+            src, dst = edge_index[0], edge_index[1]
+            num_nodes = logits.size(0)
+            current = reward_node
+            total_edge_reward = torch.zeros_like(self.tau)
+            for hop in range(max(1, self.credit_hops)):
+                total_edge_reward = total_edge_reward + (self.credit_decay ** hop) * current[dst]
+                if hop + 1 < self.credit_hops:
+                    current = scatter(current[dst], src, dim=0, dim_size=num_nodes, reduce="mean")
+            self.tau.add_(self.reinforcement_rate * total_edge_reward)
+
+        self.tau.clamp_(self.tau_min, self.tau_max)
+
+    def pheromone_statistics(self) -> Dict[str, float]:
+        tau = self.tau.detach()
+        return {
+            "tau_mean": tau.mean().item(),
+            "tau_std": tau.std(unbiased=False).item(),
+            "tau_min": tau.min().item(),
+            "tau_max": tau.max().item(),
+        }
+
+
 PHEROGNN_V7_VARIANTS = {
     "pherognn_v7_heuristic": dict(use_heuristic=True),
     "pherognn_v7_dual": dict(dual_pheromone=True),
@@ -443,5 +522,21 @@ def build_model(name, data, cfg):
         )
         kwargs.update(PHEROGNN_V7_VARIANTS[name])
         return PheroGNNv7(*common, num_edges=data.edge_index.size(1), **kwargs)
+
+    if name == "pherognn_appnp":
+        appnp_cfg = cfg.get("pheromone_appnp", {})
+        return PheroAPPNP(
+            *common,
+            num_edges=data.edge_index.size(1),
+            tau0=appnp_cfg.get("tau0", pheromone_cfg.get("tau0", 1.0)),
+            tau_min=appnp_cfg.get("tau_min", pheromone_cfg.get("tau_min", 0.05)),
+            tau_max=appnp_cfg.get("tau_max", pheromone_cfg.get("tau_max", 5.0)),
+            evaporation_rate=appnp_cfg.get("evaporation_rate", pheromone_cfg.get("evaporation_rate", 0.08)),
+            reinforcement_rate=appnp_cfg.get("reinforcement_rate", pheromone_cfg.get("reinforcement_rate", 0.35)),
+            credit_hops=appnp_cfg.get("credit_hops", pheromone_cfg.get("credit_hops", 1)),
+            credit_decay=appnp_cfg.get("credit_decay", pheromone_cfg.get("credit_decay", 0.5)),
+            K=appnp_cfg.get("K", 10),
+            appnp_alpha=appnp_cfg.get("appnp_alpha", 0.1),
+        )
 
     raise ValueError(f"Unknown model: {name}")

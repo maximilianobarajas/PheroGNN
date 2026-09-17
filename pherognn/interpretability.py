@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy.stats import pearsonr, spearmanr
-from .models import PheroGNN, PheroGNNv7
+from .models import PheroGNN, PheroGNNv7, PheroAPPNP
 
-PHERO_MODELS = (PheroGNN, PheroGNNv7)
+PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP)
 
 
 def edge_table(model, data):

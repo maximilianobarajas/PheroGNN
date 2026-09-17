@@ -12,9 +12,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from .models import PheroGNN, PheroGNNv7
+from .models import PheroGNN, PheroGNNv7, PheroAPPNP
 
-PHERO_MODELS = (PheroGNN, PheroGNNv7)
+PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP)
 
 
 def metrics(logits, y, mask, num_classes):
@@ -122,13 +122,20 @@ def train_one(model, data, cfg):
 
 # Small family of pheromone-routing mechanisms (persistent pheromone alone,
 # ACO heuristic-guided pheromone combined with a heterophily-pruning signal,
-# and structure-aware DropEdge) whose relative strength is dataset-dependent:
-# see ablation results. PheroGNN-Select trains each candidate and picks the
-# winner using only the validation partition, matching the paper's own
-# protocol of validation-only dataset-specific tuning, so it is never worse
-# than plain PheroGNN in expectation and captures genuine gains (e.g. Cora)
-# when a mechanism's inductive bias matches the graph.
-PHEROGNN_SELECT_FAMILY = ["pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge"]
+# structure-aware DropEdge, and decoupled APPNP-style deep pheromone
+# diffusion) whose relative strength is dataset-dependent: see ablation
+# results. PheroGNN-Select trains each candidate and picks the winner using
+# only the validation partition, matching the paper's own protocol of
+# validation-only dataset-specific tuning, so it is never worse than plain
+# PheroGNN in expectation and captures genuine gains (e.g. Cora, CiteSeer,
+# PubMed) when a mechanism's inductive bias matches the graph. pherognn_appnp
+# significantly hurts the small synthetic fraud graph (too many diffusion
+# hops oversmooths a 500-node graph) but significantly helps CiteSeer/PubMed,
+# which is exactly the kind of dataset-dependent trade-off this selector is
+# designed to resolve using only validation, never test, labels.
+PHEROGNN_SELECT_FAMILY = [
+    "pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge", "pherognn_appnp",
+]
 
 
 def train_select(build_model_fn, data, cfg, family=None):
