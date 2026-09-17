@@ -12,9 +12,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroEnsemble
+from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroEnsemble
 
-PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP)
+PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE)
 
 
 def metrics(logits, y, mask, num_classes):
@@ -122,19 +122,26 @@ def train_one(model, data, cfg):
 
 # Small family of pheromone-routing mechanisms (persistent pheromone alone,
 # ACO heuristic-guided pheromone combined with a heterophily-pruning signal,
-# structure-aware DropEdge, and decoupled APPNP-style deep pheromone
-# diffusion) whose relative strength is dataset-dependent: see ablation
-# results. PheroGNN-Select trains each candidate and picks the winner using
-# only the validation partition, matching the paper's own protocol of
-# validation-only dataset-specific tuning, so it is never worse than plain
-# PheroGNN in expectation and captures genuine gains (e.g. Cora, CiteSeer,
-# PubMed) when a mechanism's inductive bias matches the graph. pherognn_appnp
-# significantly hurts the small synthetic fraud graph (too many diffusion
-# hops oversmooths a 500-node graph) but significantly helps CiteSeer/PubMed,
-# which is exactly the kind of dataset-dependent trade-off this selector is
-# designed to resolve using only validation, never test, labels.
+# structure-aware DropEdge, decoupled APPNP-style deep pheromone diffusion,
+# and a GraphSAGE-backbone variant) whose relative strength is
+# dataset-dependent: see ablation results. PheroGNN-Select trains each
+# candidate and picks the winner using only the validation partition,
+# matching the paper's own protocol of validation-only dataset-specific
+# tuning, so it is never worse than plain PheroGNN in expectation and
+# captures genuine gains when a mechanism's inductive bias matches the
+# graph. pherognn_appnp significantly hurts the small synthetic fraud graph
+# but significantly helps CiteSeer/PubMed; pherognn_sage significantly
+# underperforms on the four original citation-style benchmarks (its
+# mean-aggregation backbone gives up PheroConv's GCN-style structural prior
+# there) but is the first PheroGNN variant to match or beat GraphSAGE on
+# strongly heterophilic graphs (Texas/Wisconsin/Cornell) and on the larger
+# Amazon Photo / Coauthor CS graphs, where every GCN-backbone PheroGNN
+# variant loses to GraphSAGE by a wide, significant margin. This is exactly
+# the kind of dataset-dependent trade-off this selector is designed to
+# resolve using only validation, never test, labels.
 PHEROGNN_SELECT_FAMILY = [
-    "pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge", "pherognn_appnp",
+    "pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge",
+    "pherognn_appnp", "pherognn_sage",
 ]
 
 

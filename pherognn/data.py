@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import Data
-from torch_geometric.datasets import Planetoid
+from torch_geometric.datasets import Amazon, Coauthor, Planetoid, WebKB
 import torch_geometric.transforms as T
 from torch_geometric.utils import to_undirected, coalesce
 
@@ -89,6 +89,51 @@ def planetoid(name, root="data/planetoid", seed=0, use_public_split=True) -> Dat
     return data
 
 
+def webkb(name, root="data/webkb", seed=0) -> Data:
+    """Small, strongly heterophilic web-page graphs (Texas/Wisconsin/Cornell,
+    geom-gcn splits) — a natural stress test for the heterophily-aware
+    pheromone mechanisms, which target exactly this regime. Ships with 10
+    standard random splits; seed selects one (wrapping past 10) so repeated
+    seeds still vary the split like every other dataset here."""
+    ds = WebKB(root=root, name=name, transform=T.NormalizeFeatures())
+    data = ds[0]
+    split = seed % data.train_mask.size(1)
+    data.train_mask = data.train_mask[:, split]
+    data.val_mask = data.val_mask[:, split]
+    data.test_mask = data.test_mask[:, split]
+    data.dataset_name = name.lower()
+    data.num_classes = ds.num_classes
+    return data
+
+
+def amazon(name, root="data/amazon", seed=0) -> Data:
+    """Amazon co-purchase graphs (Photo/Computers) — larger homophilic
+    benchmarks with no official split, so we stratify like the synthetic
+    fraud graph. Unlike Planetoid's binary bag-of-words, these are sparse
+    count features; L1 row-normalization squashes them into a range our
+    fixed learning rate cannot escape (GCN macro-F1 0.16 vs 0.92 raw), so
+    features are used as-is here."""
+    ds = Amazon(root=root, name=name)
+    data = ds[0]
+    data.train_mask, data.val_mask, data.test_mask = stratified_masks(data.y, seed)
+    data.dataset_name = f"amazon_{name.lower()}"
+    data.num_classes = ds.num_classes
+    return data
+
+
+def coauthor(name, root="data/coauthor", seed=0) -> Data:
+    """Microsoft Academic co-authorship graphs (CS/Physics) — larger
+    homophilic benchmarks with no official split, stratified like synthetic.
+    Same raw-feature rationale as `amazon()` (row-normalization stalls
+    training: GCN macro-F1 0.72 normalized vs 0.92 raw)."""
+    ds = Coauthor(root=root, name=name)
+    data = ds[0]
+    data.train_mask, data.val_mask, data.test_mask = stratified_masks(data.y, seed)
+    data.dataset_name = f"coauthor_{name.lower()}"
+    data.num_classes = ds.num_classes
+    return data
+
+
 def elliptic(directory, seed=0, make_undirected=True, temporal_split=True) -> Data:
     directory = Path(directory)
     fpath = directory / "elliptic_txs_features.csv"
@@ -152,6 +197,18 @@ def load_dataset(name: str, cfg: dict, seed: int) -> Data:
         c = cfg["planetoid"]
         canonical = {"cora": "Cora", "citeseer": "CiteSeer", "pubmed": "PubMed"}[name]
         return planetoid(canonical, c["root"], seed, c["use_public_split"])
+    if name in {"texas", "wisconsin", "cornell"}:
+        c = cfg.get("webkb", {"root": "data/webkb"})
+        canonical = {"texas": "Texas", "wisconsin": "Wisconsin", "cornell": "Cornell"}[name]
+        return webkb(canonical, c.get("root", "data/webkb"), seed)
+    if name in {"amazon_photo", "amazon_computers"}:
+        c = cfg.get("amazon", {"root": "data/amazon"})
+        canonical = {"amazon_photo": "Photo", "amazon_computers": "Computers"}[name]
+        return amazon(canonical, c.get("root", "data/amazon"), seed)
+    if name in {"coauthor_cs", "coauthor_physics"}:
+        c = cfg.get("coauthor", {"root": "data/coauthor"})
+        canonical = {"coauthor_cs": "CS", "coauthor_physics": "Physics"}[name]
+        return coauthor(canonical, c.get("root", "data/coauthor"), seed)
     if name == "elliptic":
         c = cfg["elliptic"]
         return elliptic(c["directory"], seed, c["make_undirected"], c["temporal_split"])

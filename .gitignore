@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 venv/
 data/planetoid/
+data/webkb/
+data/amazon/
+data/coauthor/
 data/elliptic/*.csv
 results/
 results_*/
