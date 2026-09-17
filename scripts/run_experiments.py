@@ -56,7 +56,8 @@ def main():
                 rows.append({"dataset": dataset_name, "model": model_name, "seed": seed, **result})
                 pd.DataFrame(rows).to_csv(out / "raw" / "all_runs.csv", index=False)
 
-                if model_name.startswith("pherognn") and not args.no_interpretability:
+                if (model_name.startswith("pherognn") and not args.no_interpretability
+                        and hasattr(model, "effective_tau")):
                     edge_table(model, data).to_csv(out / "pheromones" / f"{tag}_edges.csv", index=False)
                     ns, corr = centrality_analysis(model, data)
                     ns.to_csv(out / "interpretability" / f"{tag}_nodes.csv", index=False)

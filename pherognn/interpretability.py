@@ -9,8 +9,11 @@ PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP)
 
 
 def edge_table(model, data):
-    if not isinstance(model, PHERO_MODELS):
-        raise TypeError("Interpretability requires a PheroGNN model.")
+    if not hasattr(model, "effective_tau"):
+        raise TypeError(
+            "Interpretability requires a model with a single pheromone trail "
+            "(effective_tau()); an ensemble of several has no single trail to report."
+        )
 
     src, dst = data.edge_index.detach().cpu().numpy()
     tau = model.effective_tau().detach().cpu().numpy()

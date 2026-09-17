@@ -1,0 +1,57 @@
+experiment:
+  datasets: [synthetic, cora, citeseer, pubmed]
+  models: [pherognn_select]
+  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  epochs: 400
+  patience: 60
+  selection_metric: macro_f1
+
+model:
+  hidden_channels: 64
+  dropout: 0.5
+  learning_rate: 0.01
+  weight_decay: 0.0005
+
+pheromone:
+  tau0: 1.0
+  tau_min: 0.05
+  tau_max: 5.0
+  evaporation_rate: 0.08
+  reinforcement_rate: 0.35
+  credit_hops: 1
+  credit_decay: 0.5
+  gradient_clip: 5.0
+
+pheromone_v7:
+  tau0: 1.0
+  tau_min: 0.05
+  tau_max: 5.0
+  evaporation_rate: 0.08
+  reinforcement_rate: 0.35
+  credit_hops: 1
+  credit_decay: 0.5
+  gradient_clip: 5.0
+  alpha: 1.0
+  beta: 0.5
+  gate_hidden: 16
+  dropedge_base_p: 0.15
+  dropedge_layer_growth: 0.5
+
+synthetic:
+  num_legit: 420
+  num_fraud: 80
+  num_features: 16
+  train_ratio: 0.60
+  val_ratio: 0.20
+
+planetoid:
+  root: data/planetoid
+  use_public_split: true
+
+elliptic:
+  directory: data/elliptic
+  make_undirected: true
+  temporal_split: true
+
+output:
+  directory: results_select3

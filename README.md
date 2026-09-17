@@ -69,15 +69,20 @@ Since the paper's own protocol already allows dataset-specific tuning using
 only the validation partition, **`pherognn_select`**
 (`pherognn/train.py:train_select`) trains the compact, individually-justified
 family `{pherognn, pherognn_v7_heuristic_hetero, pherognn_v7_dropedge,
-pherognn_appnp}` and picks the winner by validation Macro-F1 alone (test
-labels are never used for the decision). Over 15 fresh end-to-end seeds this
-is:
+pherognn_appnp}`. It picks the winner by validation Macro-F1 among each
+individual candidate **and** a uniform probability-space ensemble
+(`PheroEnsemble`) of all of them — hard "pick one" beats averaging on
+CiteSeer (one candidate, PheroAPPNP, is uniquely strong there and dilution
+hurts) but averaging beats picking a single winner on Cora/PubMed
+(decorrelated errors across mechanisms), so which strategy to use is itself
+chosen on the validation partition, never on test labels. Over 15 fresh
+end-to-end seeds this is:
 
 | Dataset | vs plain PheroGNN | vs GCN | vs GAT | vs GraphSAGE |
 |---|---|---|---|---|
-| synthetic | tie (p=1.0) | tie (p=0.39) | tie (p=0.44) | tie (p=0.78) |
+| synthetic | tie (p=0.79) | tie (p=0.69) | tie (p=0.59) | tie (p=0.78) |
 | Cora | **+0.0071 (p=0.041)** | tie (p=0.72) | tie (p=0.89) | **+0.018 (p=0.0002)** |
-| CiteSeer | **+0.0092 (p=0.0003)** | **+0.015 (p=0.0001)** | **+0.022 (p=0.0001)** | **+0.024 (p=0.0001)** |
+| CiteSeer | **+0.0090 (p=0.0002)** | **+0.015 (p=0.0001)** | **+0.021 (p=0.0001)** | **+0.024 (p=0.0001)** |
 | PubMed | **+0.0067 (p=0.0026)** | **+0.010 (p=0.0003)** | **+0.020 (p=0.0001)** | **+0.028 (p=0.0001)** |
 
 i.e. never significantly worse than plain PheroGNN or GCN/GAT on any
@@ -86,11 +91,32 @@ datasets — see `scripts/selection_analysis.py` for the reproducible
 comparison. This is the recommended PheroGNN variant going forward,
 included by default in `configs/default.yaml`.
 
-The ablation configs used to reach this conclusion are kept for
+**Further extensions tried and rejected** (kept as available tooling, not
+part of the default family, since neither showed a statistically significant
+net improvement over the configuration above at 15 seeds):
+- *Self-training / pseudo-labeling* (`pherognn/train.py:train_self_training`,
+  `selftrain_candidate`): retrains on high-confidence predictions for nodes
+  that carry no train/val/test label at all (Planetoid's public split
+  leaves ~39-92% of nodes completely unused — e.g. 18,157/19,717 PubMed
+  nodes). This gives a large standalone gain on plain PheroGNN alone (PubMed
+  single-seed macro-F1 0.785 -> 0.803 at confidence>=0.8), but adding it as
+  one more `pherognn_select` candidate did not significantly improve on the
+  ensemble-aware selector above (Cora 0.804 vs 0.808, not significant) —
+  Select already captures most of the same gain through mechanism diversity,
+  and the self-trained candidate's own validation score is an unreliable
+  signal for whether it will win.
+- *More PheroAPPNP candidates* (`pherognn_appnp_k5`, `pherognn_appnp_k20`,
+  any `pherognn_appnp_k<N>` name is supported): adding these to the select
+  family gave non-significant Cora/CiteSeer changes and a non-significant
+  synthetic regression (more near-ceiling-but-synthetic-weak candidates
+  diluting the ensemble path), so the 4-candidate family above is kept.
+
+The ablation configs used to reach these conclusions are kept for
 reproducibility: `configs/ablation_v7.yaml` / `ablation_v7b.yaml` (5-seed
 mechanism screening), `configs/final_significance*.yaml` / `final_appnp.yaml`
 (15-seed significance runs per mechanism), and `configs/final_select*.yaml`
-(15-seed end-to-end `pherognn_select` runs). Run any of them with
+(15-seed end-to-end `pherognn_select` runs, `final_select3.yaml` being the
+current default configuration). Run any of them with
 `python scripts/run_experiments.py --config configs/<name>.yaml --no-interpretability`.
 
 ## Elliptic (optional)

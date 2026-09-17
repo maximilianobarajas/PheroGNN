@@ -459,6 +459,28 @@ class PheroAPPNP(nn.Module):
         }
 
 
+class PheroEnsemble(nn.Module):
+    """Uniform probability-space ensemble over a small set of already-trained
+    PheroGNN-family candidates. Ablation showed hard "pick one winner by
+    validation" beats averaging on CiteSeer (because one candidate,
+    PheroAPPNP, is uniquely strong there and dilution hurts) but averaging
+    beats picking a single winner on Cora and PubMed (decorrelated errors
+    across mechanisms). `train_select` resolves this by treating this
+    ensemble as one more validation-scored candidate alongside each
+    individual member, so the choice between "one winner" and "average of
+    all" is itself made on the validation partition only."""
+
+    def __init__(self, members):
+        super().__init__()
+        self.members = nn.ModuleList(members)
+
+    def forward(self, x, edge_index):
+        probs = torch.stack(
+            [F.softmax(m(x, edge_index), dim=-1) for m in self.members], dim=0
+        ).mean(dim=0)
+        return torch.log(probs.clamp_min(1e-12))
+
+
 PHEROGNN_V7_VARIANTS = {
     "pherognn_v7_heuristic": dict(use_heuristic=True),
     "pherognn_v7_dual": dict(dual_pheromone=True),
@@ -523,8 +545,17 @@ def build_model(name, data, cfg):
         kwargs.update(PHEROGNN_V7_VARIANTS[name])
         return PheroGNNv7(*common, num_edges=data.edge_index.size(1), **kwargs)
 
-    if name == "pherognn_appnp":
+    if name.startswith("pherognn_appnp"):
         appnp_cfg = cfg.get("pheromone_appnp", {})
+        K = appnp_cfg.get("K", 10)
+        appnp_alpha = appnp_cfg.get("appnp_alpha", 0.1)
+        # allows dataset-dependent K to be exposed as separate named
+        # candidates (e.g. "pherognn_appnp_k20") for PheroGNN-Select to
+        # choose between via validation, without a config file per variant.
+        if name != "pherognn_appnp":
+            suffix = name[len("pherognn_appnp_"):]
+            if suffix.startswith("k"):
+                K = int(suffix[1:])
         return PheroAPPNP(
             *common,
             num_edges=data.edge_index.size(1),
@@ -535,8 +566,8 @@ def build_model(name, data, cfg):
             reinforcement_rate=appnp_cfg.get("reinforcement_rate", pheromone_cfg.get("reinforcement_rate", 0.35)),
             credit_hops=appnp_cfg.get("credit_hops", pheromone_cfg.get("credit_hops", 1)),
             credit_decay=appnp_cfg.get("credit_decay", pheromone_cfg.get("credit_decay", 0.5)),
-            K=appnp_cfg.get("K", 10),
-            appnp_alpha=appnp_cfg.get("appnp_alpha", 0.1),
+            K=K,
+            appnp_alpha=appnp_alpha,
         )
 
     raise ValueError(f"Unknown model: {name}")

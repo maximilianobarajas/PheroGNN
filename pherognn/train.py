@@ -12,7 +12,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from .models import PheroGNN, PheroGNNv7, PheroAPPNP
+from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroEnsemble
 
 PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP)
 
@@ -139,16 +139,116 @@ PHEROGNN_SELECT_FAMILY = [
 
 
 def train_select(build_model_fn, data, cfg, family=None):
+    """`family` entries are either a plain model name (built with
+    `build_model_fn` and trained with `train_one`), or a `(label, trainer)`
+    pair where `trainer(data, cfg)` returns `(model, history, final)` itself
+    (used e.g. to fold `train_self_training` in as one more candidate)."""
     family = family or PHEROGNN_SELECT_FAMILY
     candidates = {}
-    for name in family:
-        model = build_model_fn(name, data, cfg)
-        model = model.to(data.x.device)
-        model, history, final = train_one(model, data, cfg)
+    for entry in family:
+        if isinstance(entry, tuple):
+            name, trainer = entry
+            model, history, final = trainer(data, cfg)
+        else:
+            name = entry
+            model = build_model_fn(name, data, cfg).to(data.x.device)
+            model, history, final = train_one(model, data, cfg)
         candidates[name] = (model, history, final)
 
     winner_name = max(candidates, key=lambda n: candidates[n][2]["best_val_score"])
     model, history, final = candidates[winner_name]
+    val_scores = {name: c[2]["best_val_score"] for name, c in candidates.items()}
+
+    if len(candidates) > 1:
+        ensemble = PheroEnsemble([c[0] for c in candidates.values()]).to(data.x.device)
+        ensemble.eval()
+        with torch.no_grad():
+            ens_logits = ensemble(data.x, data.edge_index)
+        ens_val = metrics(ens_logits, data.y, data.val_mask, data.num_classes)
+        val_scores["ensemble"] = ens_val[cfg["experiment"]["selection_metric"]]
+
+        if val_scores["ensemble"] >= val_scores[winner_name]:
+            ens_test = metrics(ens_logits, data.y, data.test_mask, data.num_classes)
+            final = dict(ens_test)
+            final["selected_variant"] = "ensemble(" + "+".join(candidates.keys()) + ")"
+            final["best_val_score"] = val_scores["ensemble"]
+            final["best_epoch"] = -1
+            final["runtime_seconds"] = sum(c[2].get("runtime_seconds", 0.0) for c in candidates.values())
+            return ensemble, history, final
+
     final = dict(final)
     final["selected_variant"] = winner_name
     return model, history, final
+
+
+@torch.no_grad()
+def _pseudo_label_candidates(model, data, confidence_threshold, max_fraction):
+    """Only ever considers nodes outside train/val/test (the large pool of
+    genuinely unlabeled transductive nodes that Planetoid's public split
+    leaves unused — e.g. ~92% of PubMed). Never touches val/test labels or
+    predictions, so there is no risk of leaking test information into the
+    pseudo-labeled training signal."""
+    model.eval()
+    logits = model(data.x, data.edge_index)
+    probs = torch.softmax(logits, dim=-1)
+    confidence, pred = probs.max(dim=-1)
+
+    eligible = ~(data.train_mask | data.val_mask | data.test_mask)
+    candidate = eligible & (confidence >= confidence_threshold)
+
+    max_n = int(max_fraction * eligible.sum().item())
+    if max_n > 0 and int(candidate.sum()) > max_n:
+        idx = candidate.nonzero(as_tuple=True)[0]
+        top = confidence[idx].topk(max_n).indices
+        candidate = torch.zeros_like(candidate)
+        candidate[idx[top]] = True
+
+    return candidate, pred
+
+
+def train_self_training(build_model_fn, data, cfg, base_name="pherognn_select",
+                         confidence_threshold=0.95, max_fraction=0.3, family=None):
+    """Two-stage self-training: train a base model, pseudo-label the
+    high-confidence subset of nodes that carry no train/val/test label at
+    all, then retrain from scratch on train + pseudo-labels. Evaluation is
+    always against the untouched original test_mask/y."""
+    def _train(d):
+        if base_name == "pherognn_select":
+            return train_select(build_model_fn, d, cfg, family=family)
+        m = build_model_fn(base_name, d, cfg).to(d.x.device)
+        return train_one(m, d, cfg)
+
+    model, history, final = _train(data)
+
+    pseudo_mask, pseudo_pred = _pseudo_label_candidates(
+        model, data, confidence_threshold, max_fraction)
+    num_pseudo = int(pseudo_mask.sum().item())
+    if num_pseudo == 0:
+        final = dict(final)
+        final["num_pseudo_labels"] = 0
+        return model, history, final
+
+    aug_data = data.clone()
+    aug_data.y = data.y.clone()
+    aug_data.y[pseudo_mask] = pseudo_pred[pseudo_mask]
+    aug_data.train_mask = data.train_mask | pseudo_mask
+
+    model2, history2, final2 = _train(aug_data)
+    final2 = dict(final2)
+    final2["num_pseudo_labels"] = num_pseudo
+    return model2, history2, final2
+
+
+def selftrain_candidate(build_model_fn, base_name="pherognn",
+                         confidence_threshold=0.7, max_fraction=0.5):
+    """Builds a `(label, trainer)` entry for `train_select`'s `family` list
+    that self-trains `base_name` on high-confidence pseudo-labels before
+    being scored (like any other candidate) purely on validation Macro-F1."""
+    label = f"selftrain_{base_name}_t{confidence_threshold}"
+
+    def trainer(data, cfg):
+        return train_self_training(build_model_fn, data, cfg, base_name=base_name,
+                                    confidence_threshold=confidence_threshold,
+                                    max_fraction=max_fraction)
+
+    return label, trainer
