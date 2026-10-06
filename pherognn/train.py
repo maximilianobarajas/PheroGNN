@@ -12,9 +12,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroSAGEAPPNP, PheroGCNII, PheroEnsemble
+from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroSAGEAPPNP, PheroGCNII, PheroH2, PheroGPR, PheroEnsemble
 
-PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroSAGEAPPNP, PheroGCNII)
+PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroSAGEAPPNP, PheroGCNII, PheroH2, PheroGPR)
 
 
 def metrics(logits, y, mask, num_classes):
@@ -46,9 +46,17 @@ def train_one(model, data, cfg):
     experiment_cfg = cfg["experiment"]
     gradient_clip = cfg.get("pheromone", {}).get("gradient_clip", 5.0)
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=float(model_cfg["learning_rate"]), weight_decay=float(model_cfg["weight_decay"])
-    )
+    base_lr = float(model_cfg["learning_rate"])
+    weight_decay = float(model_cfg["weight_decay"])
+    if hasattr(model, "param_groups"):
+        # Some architectures (e.g. PheroGPR's per-hop combination weights)
+        # benefit from a different learning rate on a small subset of
+        # parameters than on the bulk of the network -- a documented
+        # practical detail of those papers, not something PheroConv/
+        # PheroSAGE/plain baselines need, so it is opt-in per model.
+        optimizer = torch.optim.Adam(model.param_groups(base_lr), weight_decay=weight_decay)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 
     best_score = -np.inf
     best_state = None
@@ -141,7 +149,7 @@ def train_one(model, data, cfg):
 # resolve using only validation, never test, labels.
 PHEROGNN_SELECT_FAMILY = [
     "pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge",
-    "pherognn_appnp", "pherognn_sage", "pherognn_sage_heuristic",
+    "pherognn_appnp", "pherognn_sage", "pherognn_sage_heuristic", "pherognn_gpr",
 ]
 
 

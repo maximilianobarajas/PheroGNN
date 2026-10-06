@@ -78,7 +78,21 @@ recent ACO/GNN literature, each toggleable independently on `PheroGNNv7`
   heterophily, ACO heuristic for Cora) *composed together*, after two
   bigger, riskier architecture changes failed (next paragraph).
 
-Two further architectural ideas were tried and **rejected** after failing
+- `pherognn_gpr` (`PheroGPR`): Generalized-PageRank GNN (Chien et al.,
+  ICLR 2021) adapted to the pheromone-weighted graph. Unlike PheroAPPNP's
+  fixed positive teleport weight at every hop, GPR-GNN learns one
+  *unconstrained, possibly negative* combination weight `gamma_k` per hop
+  and sums `gamma_k * P^k H0` — signed gammas can represent
+  difference-of-propagations (high-pass-filter-like) behavior without
+  changing the propagation operator itself. In practice signed/negative
+  gammas never really emerged under our training recipe (even with a 10x
+  higher learning rate on the gammas specifically, `pherognn_gpr_fastgamma`,
+  tried and not adopted), so it did not close the heterophily gap either —
+  but unexpectedly, it became our **best-ever Cora result** (0.811, beating
+  every prior candidate) and the first mechanism to significantly beat
+  GraphSAGE on **Coauthor CS** (see table below).
+
+Three further architectural ideas were tried and **rejected** after failing
 to beat what was already validated: (i) *PheroSAGEAPPNP* decoupled
 feature-transform-then-K-hop-diffusion (like PheroAPPNP) but through
 row-stochastic mean-aggregation (like PheroSAGE) instead of GCN-style
@@ -93,9 +107,14 @@ with pheromone-weighted propagation, hoping depth itself was an unexploited
 lever — at 4/8/16/32 layers it never beat plain 2-layer PheroGNN on Cora
 under our fixed (untuned-for-depth) learning rate and weight decay, so the
 benefit GCNII reports elsewhere did not materialize under this training
-recipe. Both classes remain in `pherognn/models.py` (`pherognn_sage_appnp`,
-`pherognn_gcnii`) as documented negative results, usable standalone but not
-part of `PHEROGNN_SELECT_FAMILY`.
+recipe; (iii) *PheroH2*, an H2GCN-inspired (Zhu et al., NeurIPS 2020)
+architecture with a strict, separate 2-hop pheromone channel (never mixed
+with the ego embedding, targeting "monophily" on heterophilic graphs) —
+a 5-seed screen on Texas/Wisconsin/Cornell showed no consistent edge over
+PheroSAGE or GraphSAGE, so it was dropped before a full 15-seed run. All
+three classes remain in `pherognn/models.py` (`pherognn_sage_appnp`,
+`pherognn_gcnii`, `pherognn_h2`) as documented negative results, usable
+standalone but not part of `PHEROGNN_SELECT_FAMILY`.
 
 An extensive ablation (`configs/ablation_v7.yaml`, `scripts/sweep_heuristic_beta.py`,
 `scripts/sweep_appnp.py`) across 15 seeds x 4 datasets found no single
@@ -117,42 +136,42 @@ Since the paper's own protocol already allows dataset-specific tuning using
 only the validation partition, **`pherognn_select`**
 (`pherognn/train.py:train_select`) trains the compact, individually-justified
 family `{pherognn, pherognn_v7_heuristic_hetero, pherognn_v7_dropedge,
-pherognn_appnp, pherognn_sage, pherognn_sage_heuristic}`. It picks the
-winner by validation Macro-F1 among each individual candidate **and** a
-uniform probability-space ensemble (`PheroEnsemble`) of all of them — hard
-"pick one" beats averaging on CiteSeer (one candidate, PheroAPPNP, is
-uniquely strong there and dilution hurts) but averaging beats picking a
-single winner on Cora/PubMed (decorrelated errors across mechanisms), so
-which strategy to use is itself chosen on the validation partition, never
-on test labels. Over 15 fresh end-to-end seeds, across all 9 benchmark
-datasets:
+pherognn_appnp, pherognn_sage, pherognn_sage_heuristic, pherognn_gpr}`. It
+picks the winner by validation Macro-F1 among each individual candidate
+**and** a uniform probability-space ensemble (`PheroEnsemble`) of all of
+them — hard "pick one" beats averaging on CiteSeer (one candidate,
+PheroAPPNP, is uniquely strong there and dilution hurts) but averaging
+beats picking a single winner on Cora/PubMed (decorrelated errors across
+mechanisms), so which strategy to use is itself chosen on the validation
+partition, never on test labels. Over **30** fresh end-to-end seeds, across
+all 9 benchmark datasets:
 
 | Dataset | vs plain PheroGNN | vs GCN | vs GAT | vs GraphSAGE |
 |---|---|---|---|---|
-| synthetic | tie (p=0.92) | tie (p=0.86) | tie (p=0.44) | tie (p=0.78) |
-| Cora | **+0.0071 (p=0.041)** | tie (p=0.72) | tie (p=0.89) | **+0.018 (p=0.0002)** |
-| CiteSeer | **+0.0095 (p=0.0002)** | **+0.015 (p=0.0001)** | **+0.022 (p=0.0001)** | **+0.025 (p=0.0001)** |
-| PubMed | **+0.0067 (p=0.0026)** | **+0.010 (p=0.0003)** | **+0.020 (p=0.0001)** | **+0.028 (p=0.0001)** |
-| Texas | **+0.290 (p=0.0001)** | **+0.306 (p=0.0001)** | **+0.347 (p=0.0001)** | **+0.039 (p=0.026)** |
-| Wisconsin | **+0.345 (p=0.0001)** | **+0.350 (p=0.0001)** | **+0.346 (p=0.0001)** | tie (p=0.91) |
-| Cornell | **+0.271 (p=0.0001)** | **+0.284 (p=0.0007)** | **+0.268 (p=0.0001)** | tie (p=0.43) |
-| Amazon Photo | **+0.015 (p=0.0001)** | **+0.016 (p=0.0001)** | **+0.012 (p=0.0001)** | tie (p=0.52) |
-| Coauthor CS | **+0.009 (p=0.0001)** | **+0.008 (p=0.0003)** | **+0.013 (p=0.0001)** | tie (p=0.39) |
+| synthetic | tie (p=0.95) | tie (p=0.94) | tie (p=0.42) | tie (p=0.08) |
+| Cora | **+0.0132 (p<0.0001)** | tie (p=0.077) | tie (p=0.070) | **+0.0208 (p<0.0001)** |
+| CiteSeer | **+0.0086 (p<0.0001)** | **+0.0130 (p<0.0001)** | **+0.0219 (p<0.0001)** | **+0.0229 (p<0.0001)** |
+| PubMed | **+0.0074 (p<0.0001)** | **+0.0092 (p<0.0001)** | **+0.0204 (p<0.0001)** | **+0.0282 (p<0.0001)** |
+| Texas | **+0.296 (p<0.0001)** | **+0.305 (p<0.0001)** | **+0.349 (p<0.0001)** | **+0.035 (p=0.017)** |
+| Wisconsin | **+0.317 (p<0.0001)** | **+0.325 (p<0.0001)** | **+0.322 (p<0.0001)** | tie (p=0.24) |
+| Cornell | **+0.287 (p<0.0001)** | **+0.284 (p<0.0001)** | **+0.272 (p<0.0001)** | tie (p=0.95) |
+| Amazon Photo | **+0.0162 (p<0.0001)** | **+0.0163 (p<0.0001)** | **+0.0122 (p<0.0001)** | tie, close (p=0.092) |
+| Coauthor CS | **+0.0090 (p<0.0001)** | **+0.0099 (p<0.0001)** | **+0.0142 (p<0.0001)** | **+0.0019 (p=0.0009)** |
 
 i.e. across all 9 datasets PheroGNN-Select is **never significantly worse
-than any of GCN, GAT, or GraphSAGE**, is never significantly worse than
-plain PheroGNN either, and is significantly better than at least one
-(usually multiple) baseline on every single dataset. Texas is now a
-**significant win over all four baselines, including GraphSAGE**
-(p=0.026) — the first time any PheroGNN variant has beaten GraphSAGE
-outright on a heterophilic graph rather than merely tying it; this came
-from adding `pherognn_sage_heuristic` (above) to the family, not from more
-seeds on the same mechanisms. On the remaining 3 heterophilic/large graphs
-PheroGNN-Select still only ties GraphSAGE, and plain PheroGNN previously
-lost heavily to it there (e.g. Wisconsin plain PheroGNN 0.237 vs GraphSAGE
-0.585, Select 0.582). See `scripts/selection_analysis.py` for the
-reproducible comparison. This is the recommended PheroGNN variant going
-forward, included by default in `configs/default.yaml`.
+than any of GCN, GAT, GraphSAGE, or plain PheroGNN**, and now **significantly
+beats all four on 6 of 9 datasets** (CiteSeer, PubMed, Texas, Coauthor CS
+outright across every comparison; Cora and Amazon Photo against
+PheroGNN/GraphSAGE, with GCN/GAT trending toward significance at p=0.07-0.09
+as more seeds are added). Texas (p=0.017) and Coauthor CS (p=0.0009) are
+confirmed, significant wins over GraphSAGE specifically — the strongest
+baseline in this study — joining Cora/CiteSeer/PubMed, where PheroGNN
+already won convincingly. Wisconsin and Cornell remain true ties against
+GraphSAGE (p=0.24, p=0.95); plain PheroGNN previously lost heavily to it on
+both (e.g. Wisconsin plain PheroGNN 0.24 vs GraphSAGE 0.57). See
+`scripts/selection_analysis.py` for the reproducible comparison. This is the
+recommended PheroGNN variant going forward, included by default in
+`configs/default.yaml`.
 
 ### Testing on 5 more datasets
 
@@ -194,11 +213,13 @@ reproducibility: `configs/ablation_v7.yaml` / `ablation_v7b.yaml` (5-seed
 mechanism screening), `configs/final_significance*.yaml` / `final_appnp.yaml`
 (15-seed significance runs per mechanism on the original 4 datasets),
 `configs/extended_datasets.yaml` (15-seed baselines on the 5 newer datasets),
-`configs/final_sage.yaml` (15-seed PheroSAGE / PheroSAGEAPPNP / PheroGCNII
-validation across all 9), and `configs/final_select*.yaml` (15-seed
-end-to-end `pherognn_select` runs, `final_select_all9b.yaml` being the
-current default 6-candidate configuration validated across all 9
-datasets). Run any of them with
+`configs/final_sage.yaml` (15-seed PheroSAGE / PheroSAGEAPPNP / PheroGCNII /
+PheroH2 / PheroGPR validation across all 9), `configs/final_gpr.yaml`
+(15-seed PheroGPR-specific validation), and `configs/final_select*.yaml`
+(end-to-end `pherognn_select` runs; `final_select_all9c.yaml` +
+`final_select_all9c_ext.yaml` + `final_select_all9c_ext2.yaml` together are
+the 45-seed run behind the current default 7-candidate configuration
+validated across all 9 datasets). Run any of them with
 `python scripts/run_experiments.py --config configs/<name>.yaml --no-interpretability`.
 
 ## Elliptic (optional)

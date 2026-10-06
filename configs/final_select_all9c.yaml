@@ -1,6 +1,6 @@
 experiment:
   datasets: [synthetic, cora, citeseer, pubmed, texas, wisconsin, cornell, amazon_photo, coauthor_cs]
-  models: [gcn, gat, graphsage, pherognn, pherognn_sage]
+  models: [gcn, gat, graphsage, pherognn, pherognn_select]
   seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
   epochs: 400
   patience: 60
@@ -48,29 +48,6 @@ pheromone_appnp:
   K: 10
   appnp_alpha: 0.1
 
-pheromone_gpr:
-  tau0: 1.0
-  tau_min: 0.05
-  tau_max: 5.0
-  evaporation_rate: 0.08
-  reinforcement_rate: 0.35
-  credit_hops: 1
-  credit_decay: 0.5
-  K: 10
-  gpr_alpha: 0.1
-
-pheromone_gcnii:
-  tau0: 1.0
-  tau_min: 0.05
-  tau_max: 5.0
-  evaporation_rate: 0.08
-  reinforcement_rate: 0.35
-  credit_hops: 1
-  credit_decay: 0.5
-  num_layers: 16
-  gcnii_alpha: 0.1
-  gcnii_lambda: 0.5
-
 synthetic:
   num_legit: 420
   num_fraud: 80
@@ -97,4 +74,4 @@ elliptic:
   temporal_split: true
 
 output:
-  directory: results_sage
+  directory: results_select_final3

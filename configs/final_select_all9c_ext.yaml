@@ -1,17 +1,44 @@
 experiment:
-  datasets: [synthetic, cora, citeseer, pubmed, texas, wisconsin, cornell, amazon_photo, coauthor_cs]
-  models: [gcn, gat, graphsage, pherognn, pherognn_sage]
-  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  datasets:
+  - synthetic
+  - cora
+  - citeseer
+  - pubmed
+  - texas
+  - wisconsin
+  - cornell
+  - amazon_photo
+  - coauthor_cs
+  models:
+  - gcn
+  - gat
+  - graphsage
+  - pherognn
+  - pherognn_select
+  seeds:
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
   epochs: 400
   patience: 60
   selection_metric: macro_f1
-
 model:
   hidden_channels: 64
   dropout: 0.5
   learning_rate: 0.01
   weight_decay: 0.0005
-
 pheromone:
   tau0: 1.0
   tau_min: 0.05
@@ -21,7 +48,6 @@ pheromone:
   credit_hops: 1
   credit_decay: 0.5
   gradient_clip: 5.0
-
 pheromone_v7:
   tau0: 1.0
   tau_min: 0.05
@@ -36,7 +62,6 @@ pheromone_v7:
   gate_hidden: 16
   dropedge_base_p: 0.15
   dropedge_layer_growth: 0.5
-
 pheromone_appnp:
   tau0: 1.0
   tau_min: 0.05
@@ -47,54 +72,24 @@ pheromone_appnp:
   credit_decay: 0.5
   K: 10
   appnp_alpha: 0.1
-
-pheromone_gpr:
-  tau0: 1.0
-  tau_min: 0.05
-  tau_max: 5.0
-  evaporation_rate: 0.08
-  reinforcement_rate: 0.35
-  credit_hops: 1
-  credit_decay: 0.5
-  K: 10
-  gpr_alpha: 0.1
-
-pheromone_gcnii:
-  tau0: 1.0
-  tau_min: 0.05
-  tau_max: 5.0
-  evaporation_rate: 0.08
-  reinforcement_rate: 0.35
-  credit_hops: 1
-  credit_decay: 0.5
-  num_layers: 16
-  gcnii_alpha: 0.1
-  gcnii_lambda: 0.5
-
 synthetic:
   num_legit: 420
   num_fraud: 80
   num_features: 16
-  train_ratio: 0.60
-  val_ratio: 0.20
-
+  train_ratio: 0.6
+  val_ratio: 0.2
 planetoid:
   root: data/planetoid
   use_public_split: true
-
 webkb:
   root: data/webkb
-
 amazon:
   root: data/amazon
-
 coauthor:
   root: data/coauthor
-
 elliptic:
   directory: data/elliptic
   make_undirected: true
   temporal_split: true
-
 output:
-  directory: results_sage
+  directory: results_select_final3_ext

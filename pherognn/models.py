@@ -833,6 +833,253 @@ class PheroGCNII(nn.Module):
         }
 
 
+def _mean_aggregate(x, edge_index, tau, num_nodes, tau_eps=1e-8):
+    """Shared mean-aggregation-with-relative-pheromone-weight helper (same
+    normalization PheroConvSAGE uses), factored out so PheroH2 can apply it
+    identically to the 1-hop and 2-hop channels."""
+    if edge_index.size(1) == 0:
+        return torch.zeros(num_nodes, x.size(-1), device=x.device, dtype=x.dtype)
+    src, dst = edge_index
+    incoming_sum = scatter(tau, dst, dim=0, dim_size=num_nodes, reduce="sum")
+    incoming_count = scatter(
+        torch.ones_like(tau), dst, dim=0, dim_size=num_nodes, reduce="sum"
+    ).clamp_min(1.0)
+    incoming_mean = (incoming_sum / incoming_count).clamp_min(tau_eps)
+    relative_tau = tau / incoming_mean[dst]
+    msg = x[src] * relative_tau.view(-1, 1)
+    return scatter(msg, dst, dim=0, dim_size=num_nodes, reduce="mean")
+
+
+def _gcn_aggregate(x, edge_index, tau, num_nodes, tau_eps=1e-8):
+    """GCN-style (symmetric-normalized sum) pheromone-weighted aggregation,
+    with self-loops -- the same propagation operator PheroConv/PheroAPPNP
+    use, factored out so PheroGPR can apply it repeatedly without a fresh
+    linear transform at every hop."""
+    num_edges = edge_index.size(1)
+    edge_index_loop, _ = add_remaining_self_loops(edge_index, num_nodes=num_nodes)
+    added = edge_index_loop.size(1) - num_edges
+    if added:
+        loop_tau = torch.ones(added, device=tau.device, dtype=tau.dtype)
+        tau_loop = torch.cat([tau, loop_tau], dim=0)
+    else:
+        tau_loop = tau
+
+    src, dst = edge_index_loop
+    incoming_sum = scatter(tau_loop, dst, dim=0, dim_size=num_nodes, reduce="sum")
+    incoming_count = scatter(
+        torch.ones_like(tau_loop), dst, dim=0, dim_size=num_nodes, reduce="sum"
+    ).clamp_min(1.0)
+    incoming_mean = (incoming_sum / incoming_count).clamp_min(tau_eps)
+    relative_tau = tau_loop / incoming_mean[dst]
+
+    degree = scatter(
+        torch.ones_like(relative_tau), dst, dim=0, dim_size=num_nodes, reduce="sum"
+    ).clamp_min(1.0)
+    degree_inv_sqrt = degree.pow(-0.5)
+    gcn_norm_w = degree_inv_sqrt[src] * degree_inv_sqrt[dst]
+    edge_weight = gcn_norm_w * relative_tau
+
+    msg = x[src] * edge_weight.view(-1, 1)
+    return scatter(msg, dst, dim=0, dim_size=num_nodes, reduce="sum")
+
+
+class PheroGPR(nn.Module):
+    """Generalized-PageRank GNN (Chien et al., ICLR 2021, "GPR-GNN"),
+    adapted to propagate through the persistent-pheromone-weighted graph.
+    Unlike PheroAPPNP (fixed positive teleport weight at every hop, which
+    assumes homophily -- more hops always means "smooth more towards my
+    neighbors"), GPR-GNN learns one *unconstrained, possibly negative*
+    combination weight gamma_k per hop k=0..K and sums gamma_k * P^k H0.
+    Signed gammas let the model represent difference-of-propagations
+    (high-pass-filter-like) behavior, which the GPR-GNN paper shows helps
+    on heterophilic graphs *without* changing the propagation operator
+    itself -- a different, more flexible lever than anything tried so far
+    in this project (which either fixed the combination weights, as in
+    PheroAPPNP, or changed the aggregation operator, as in PheroSAGE)."""
+
+    def __init__(self, in_dim, hidden, out_dim, dropout, num_edges,
+                 tau0=1.0, tau_min=0.05, tau_max=5.0,
+                 evaporation_rate=0.08, reinforcement_rate=0.35,
+                 credit_hops=1, credit_decay=0.5,
+                 K=10, gpr_alpha=0.1, gamma_lr_mult=1.0, tau_eps=1e-8):
+        super().__init__()
+        self.gamma_lr_mult = float(gamma_lr_mult)
+        self.lin1 = nn.Linear(in_dim, hidden)
+        self.lin2 = nn.Linear(hidden, out_dim)
+        self.dropout = float(dropout)
+        self.K = int(K)
+        self.tau_eps = float(tau_eps)
+        # Personalized-PageRank initialization (gamma_k = alpha*(1-alpha)^k,
+        # last term (1-alpha)^K): matches APPNP's fixed point as the
+        # starting guess, but every gamma remains a free, signed parameter.
+        init_gammas = [gpr_alpha * (1 - gpr_alpha) ** k for k in range(self.K)]
+        init_gammas.append((1 - gpr_alpha) ** self.K)
+        self.gammas = nn.Parameter(torch.tensor(init_gammas, dtype=torch.float))
+
+        self.tau0 = float(tau0)
+        self.tau_min = float(tau_min)
+        self.tau_max = float(tau_max)
+        self.evaporation_rate = float(evaporation_rate)
+        self.reinforcement_rate = float(reinforcement_rate)
+        self.credit_hops = int(credit_hops)
+        self.credit_decay = float(credit_decay)
+
+        self.register_buffer("tau", torch.full((num_edges,), self.tau0))
+
+    def effective_tau(self):
+        return self.tau
+
+    def param_groups(self, base_lr):
+        gamma_ids = {id(self.gammas)}
+        other = [p for p in self.parameters() if id(p) not in gamma_ids]
+        return [
+            {"params": other, "lr": base_lr},
+            {"params": [self.gammas], "lr": base_lr * self.gamma_lr_mult},
+        ]
+
+    def forward(self, x, edge_index):
+        h = F.relu(self.lin1(x))
+        h = F.dropout(h, self.dropout, self.training)
+        h0 = self.lin2(h)
+        h0 = F.dropout(h0, self.dropout, self.training)
+
+        num_nodes = h0.size(0)
+        current = h0
+        z = self.gammas[0] * h0
+        for k in range(1, self.K + 1):
+            current = _gcn_aggregate(current, edge_index, self.tau, num_nodes, self.tau_eps)
+            z = z + self.gammas[k] * current
+        return z
+
+    @torch.no_grad()
+    def update_pheromones(self, logits, y, train_mask, edge_index):
+        if self.evaporation_rate > 0:
+            self.tau.mul_(1.0 - self.evaporation_rate).add_(self.evaporation_rate * self.tau0)
+
+        if self.reinforcement_rate > 0:
+            probs = torch.softmax(logits, dim=-1)
+            safe_y = y.clamp_min(0)
+            true_prob = probs.gather(1, safe_y.unsqueeze(1)).squeeze(1)
+            reward_node = torch.zeros(logits.size(0), device=logits.device, dtype=self.tau.dtype)
+            reward_node[train_mask] = 2.0 * true_prob[train_mask] - 1.0
+
+            src, dst = edge_index[0], edge_index[1]
+            num_nodes = logits.size(0)
+            current = reward_node
+            total_edge_reward = torch.zeros_like(self.tau)
+            for hop in range(max(1, self.credit_hops)):
+                total_edge_reward = total_edge_reward + (self.credit_decay ** hop) * current[dst]
+                if hop + 1 < self.credit_hops:
+                    current = scatter(current[dst], src, dim=0, dim_size=num_nodes, reduce="mean")
+            self.tau.add_(self.reinforcement_rate * total_edge_reward)
+
+        self.tau.clamp_(self.tau_min, self.tau_max)
+
+    def pheromone_statistics(self) -> Dict[str, float]:
+        tau = self.tau.detach()
+        return {
+            "tau_mean": tau.mean().item(),
+            "tau_std": tau.std(unbiased=False).item(),
+            "tau_min": tau.min().item(),
+            "tau_max": tau.max().item(),
+            "gpr_gamma_sum": self.gammas.detach().sum().item(),
+        }
+
+
+class PheroH2(nn.Module):
+    """H2GCN-inspired (Zhu et al., NeurIPS 2020) architecture, adapted to
+    carry two *separate* persistent, evaporating/reinforcing pheromone
+    trails -- one for 1-hop edges, one for strict 2-hop edges (pairs
+    reachable in exactly two steps that are not already 1-hop neighbors).
+    The key difference from every other PheroGNN variant: the ego (self)
+    representation is never mixed into the aggregated neighbor
+    representations at all -- not even via a per-layer self-transform like
+    PheroSAGE -- they are computed independently and only combined by
+    concatenation right before the classifier. This directly targets
+    "monophily": on heterophilic graphs, a node's 2-hop neighbors are often
+    more likely to share its class than its 1-hop neighbors are, so giving
+    the model an explicit, separate 2-hop channel -- rather than relying on
+    a 1-hop-only aggregator, however it is weighted -- is a structurally
+    different lever than anything else tried in this project (which all
+    kept a single aggregated neighborhood, 1-hop for PheroConv/PheroSAGE or
+    many-hop-diffused for PheroAPPNP).
+    """
+
+    def __init__(self, in_dim, hidden, out_dim, dropout, num_edges, num_edges_2hop,
+                 edge_index_2hop,
+                 tau0=1.0, tau_min=0.05, tau_max=5.0,
+                 evaporation_rate=0.08, reinforcement_rate=0.35,
+                 credit_hops=1, credit_decay=0.5, tau_eps=1e-8):
+        super().__init__()
+        self.lin_ego = nn.Linear(in_dim, hidden)
+        self.lin_1hop = nn.Linear(in_dim, hidden)
+        self.lin_2hop = nn.Linear(in_dim, hidden)
+        self.classifier = nn.Linear(hidden * 3, out_dim)
+        self.dropout = float(dropout)
+        self.tau_eps = float(tau_eps)
+
+        self.tau0 = float(tau0)
+        self.tau_min = float(tau_min)
+        self.tau_max = float(tau_max)
+        self.evaporation_rate = float(evaporation_rate)
+        self.reinforcement_rate = float(reinforcement_rate)
+        self.credit_hops = int(credit_hops)
+        self.credit_decay = float(credit_decay)
+
+        self.register_buffer("edge_index_2hop", edge_index_2hop)
+        self.register_buffer("tau_1hop", torch.full((num_edges,), self.tau0))
+        self.register_buffer("tau_2hop", torch.full((num_edges_2hop,), self.tau0))
+
+    def effective_tau(self):
+        return self.tau_1hop
+
+    def forward(self, x, edge_index):
+        num_nodes = x.size(0)
+        ego = F.relu(self.lin_ego(x))
+        h1 = F.relu(_mean_aggregate(self.lin_1hop(x), edge_index, self.tau_1hop, num_nodes, self.tau_eps))
+        h2 = F.relu(_mean_aggregate(self.lin_2hop(x), self.edge_index_2hop, self.tau_2hop, num_nodes, self.tau_eps))
+        combined = torch.cat([ego, h1, h2], dim=-1)
+        combined = F.dropout(combined, self.dropout, self.training)
+        return self.classifier(combined)
+
+    def _update_one(self, tau, edge_index, reward_node, evap_target):
+        if self.evaporation_rate > 0:
+            tau.mul_(1.0 - self.evaporation_rate).add_(self.evaporation_rate * evap_target)
+        if self.reinforcement_rate > 0 and edge_index.size(1) > 0:
+            src, dst = edge_index[0], edge_index[1]
+            num_nodes = reward_node.size(0)
+            current = reward_node
+            total_edge_reward = torch.zeros_like(tau)
+            for hop in range(max(1, self.credit_hops)):
+                total_edge_reward = total_edge_reward + (self.credit_decay ** hop) * current[dst]
+                if hop + 1 < self.credit_hops:
+                    current = scatter(current[dst], src, dim=0, dim_size=num_nodes, reduce="mean")
+            tau.add_(self.reinforcement_rate * total_edge_reward)
+        tau.clamp_(self.tau_min, self.tau_max)
+
+    @torch.no_grad()
+    def update_pheromones(self, logits, y, train_mask, edge_index):
+        probs = torch.softmax(logits, dim=-1)
+        safe_y = y.clamp_min(0)
+        true_prob = probs.gather(1, safe_y.unsqueeze(1)).squeeze(1)
+        reward_node = torch.zeros(logits.size(0), device=logits.device, dtype=self.tau_1hop.dtype)
+        reward_node[train_mask] = 2.0 * true_prob[train_mask] - 1.0
+
+        self._update_one(self.tau_1hop, edge_index, reward_node, self.tau0)
+        self._update_one(self.tau_2hop, self.edge_index_2hop, reward_node, self.tau0)
+
+    def pheromone_statistics(self) -> Dict[str, float]:
+        tau = self.tau_1hop.detach()
+        tau2 = self.tau_2hop.detach()
+        return {
+            "tau_mean": tau.mean().item(),
+            "tau_std": tau.std(unbiased=False).item(),
+            "tau_min": tau.min().item(),
+            "tau_max": tau.max().item(),
+            "tau_2hop_mean": tau2.mean().item(),
+        }
+
+
 PHEROGNN_V7_VARIANTS = {
     "pherognn_v7_heuristic": dict(use_heuristic=True),
     "pherognn_v7_dual": dict(dual_pheromone=True),
@@ -924,6 +1171,38 @@ def build_model(name, data, cfg):
             num_layers=gcnii_cfg.get("num_layers", 16),
             gcnii_alpha=gcnii_cfg.get("gcnii_alpha", 0.1),
             gcnii_lambda=gcnii_cfg.get("gcnii_lambda", 0.5),
+        )
+
+    if name == "pherognn_h2":
+        return PheroH2(
+            *common,
+            num_edges=data.edge_index.size(1),
+            num_edges_2hop=data.edge_index_2hop.size(1),
+            edge_index_2hop=data.edge_index_2hop,
+            tau0=pheromone_cfg.get("tau0", 1.0),
+            tau_min=pheromone_cfg.get("tau_min", 0.05),
+            tau_max=pheromone_cfg.get("tau_max", 5.0),
+            evaporation_rate=pheromone_cfg.get("evaporation_rate", 0.08),
+            reinforcement_rate=pheromone_cfg.get("reinforcement_rate", 0.35),
+            credit_hops=pheromone_cfg.get("credit_hops", 1),
+            credit_decay=pheromone_cfg.get("credit_decay", 0.5),
+        )
+
+    if name in {"pherognn_gpr", "pherognn_gpr_fastgamma"}:
+        gpr_cfg = cfg.get("pheromone_gpr", {})
+        return PheroGPR(
+            *common,
+            num_edges=data.edge_index.size(1),
+            tau0=gpr_cfg.get("tau0", pheromone_cfg.get("tau0", 1.0)),
+            tau_min=gpr_cfg.get("tau_min", pheromone_cfg.get("tau_min", 0.05)),
+            tau_max=gpr_cfg.get("tau_max", pheromone_cfg.get("tau_max", 5.0)),
+            evaporation_rate=gpr_cfg.get("evaporation_rate", pheromone_cfg.get("evaporation_rate", 0.08)),
+            reinforcement_rate=gpr_cfg.get("reinforcement_rate", pheromone_cfg.get("reinforcement_rate", 0.35)),
+            credit_hops=gpr_cfg.get("credit_hops", pheromone_cfg.get("credit_hops", 1)),
+            credit_decay=gpr_cfg.get("credit_decay", pheromone_cfg.get("credit_decay", 0.5)),
+            K=gpr_cfg.get("K", 10),
+            gpr_alpha=gpr_cfg.get("gpr_alpha", 0.1),
+            gamma_lr_mult=(10.0 if name == "pherognn_gpr_fastgamma" else 1.0),
         )
 
     if name in PHEROGNN_V7_VARIANTS:

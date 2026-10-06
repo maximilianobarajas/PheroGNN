@@ -4,11 +4,30 @@ from typing import Optional
 import random
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import torch
 from torch_geometric.data import Data
 from torch_geometric.datasets import Amazon, Coauthor, Planetoid, WebKB
 import torch_geometric.transforms as T
 from torch_geometric.utils import to_undirected, coalesce
+
+
+def two_hop_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """Strict 2-hop edges: pairs reachable in exactly 2 steps, excluding any
+    pair that is already a 1-hop edge or a self-loop. Used by PheroH2 to give
+    heterophilic graphs ("my neighbor's neighbor is more likely my class"
+    -- the H2GCN / monophily observation) an explicit, separate channel
+    rather than folding 2-hop information into a 1-hop-only aggregator."""
+    src, dst = edge_index.cpu().numpy()
+    A = sp.coo_matrix((np.ones(len(src)), (src, dst)), shape=(num_nodes, num_nodes)).tocsr()
+    A.data[:] = 1
+    A2 = (A @ A).tocsr()
+    A2.data[:] = 1
+    A2 = A2 - A2.multiply(A)
+    A2.setdiag(0)
+    A2.eliminate_zeros()
+    A2 = A2.tocoo()
+    return torch.tensor(np.stack([A2.row, A2.col]), dtype=torch.long)
 
 
 def set_seed(seed: int) -> None:
@@ -192,24 +211,28 @@ def load_dataset(name: str, cfg: dict, seed: int) -> Data:
     name = name.lower()
     if name == "synthetic":
         c = cfg["synthetic"]
-        return synthetic_fraud(seed, c["num_legit"], c["num_fraud"], c["num_features"])
-    if name in {"cora", "citeseer", "pubmed"}:
+        data = synthetic_fraud(seed, c["num_legit"], c["num_fraud"], c["num_features"])
+    elif name in {"cora", "citeseer", "pubmed"}:
         c = cfg["planetoid"]
         canonical = {"cora": "Cora", "citeseer": "CiteSeer", "pubmed": "PubMed"}[name]
-        return planetoid(canonical, c["root"], seed, c["use_public_split"])
-    if name in {"texas", "wisconsin", "cornell"}:
+        data = planetoid(canonical, c["root"], seed, c["use_public_split"])
+    elif name in {"texas", "wisconsin", "cornell"}:
         c = cfg.get("webkb", {"root": "data/webkb"})
         canonical = {"texas": "Texas", "wisconsin": "Wisconsin", "cornell": "Cornell"}[name]
-        return webkb(canonical, c.get("root", "data/webkb"), seed)
-    if name in {"amazon_photo", "amazon_computers"}:
+        data = webkb(canonical, c.get("root", "data/webkb"), seed)
+    elif name in {"amazon_photo", "amazon_computers"}:
         c = cfg.get("amazon", {"root": "data/amazon"})
         canonical = {"amazon_photo": "Photo", "amazon_computers": "Computers"}[name]
-        return amazon(canonical, c.get("root", "data/amazon"), seed)
-    if name in {"coauthor_cs", "coauthor_physics"}:
+        data = amazon(canonical, c.get("root", "data/amazon"), seed)
+    elif name in {"coauthor_cs", "coauthor_physics"}:
         c = cfg.get("coauthor", {"root": "data/coauthor"})
         canonical = {"coauthor_cs": "CS", "coauthor_physics": "Physics"}[name]
-        return coauthor(canonical, c.get("root", "data/coauthor"), seed)
-    if name == "elliptic":
+        data = coauthor(canonical, c.get("root", "data/coauthor"), seed)
+    elif name == "elliptic":
         c = cfg["elliptic"]
-        return elliptic(c["directory"], seed, c["make_undirected"], c["temporal_split"])
-    raise ValueError(f"Unknown dataset: {name}")
+        data = elliptic(c["directory"], seed, c["make_undirected"], c["temporal_split"])
+    else:
+        raise ValueError(f"Unknown dataset: {name}")
+
+    data.edge_index_2hop = two_hop_edge_index(data.edge_index, data.num_nodes)
+    return data
