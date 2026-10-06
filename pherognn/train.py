@@ -12,9 +12,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroEnsemble
+from .models import PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroSAGEAPPNP, PheroGCNII, PheroEnsemble
 
-PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE)
+PHERO_MODELS = (PheroGNN, PheroGNNv7, PheroAPPNP, PheroSAGE, PheroSAGEAPPNP, PheroGCNII)
 
 
 def metrics(logits, y, mask, num_classes):
@@ -141,7 +141,7 @@ def train_one(model, data, cfg):
 # resolve using only validation, never test, labels.
 PHEROGNN_SELECT_FAMILY = [
     "pherognn", "pherognn_v7_heuristic_hetero", "pherognn_v7_dropedge",
-    "pherognn_appnp", "pherognn_sage",
+    "pherognn_appnp", "pherognn_sage", "pherognn_sage_heuristic",
 ]
 
 

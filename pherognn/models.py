@@ -391,11 +391,16 @@ class PheroConvSAGE(MessagePassing):
     persistent pheromone memory does not, by itself, fix the structural
     disadvantage of symmetric-normalized aggregation on those graphs."""
 
-    def __init__(self, in_dim, out_dim, tau_eps=1e-8):
+    def __init__(self, in_dim, out_dim, use_heuristic=False, beta=0.5, tau_eps=1e-8):
         super().__init__(aggr="mean", node_dim=0)
         self.lin_self = nn.Linear(in_dim, out_dim, bias=True)
         self.lin_neigh = nn.Linear(in_dim, out_dim, bias=False)
         self.tau_eps = float(tau_eps)
+        self.use_heuristic = bool(use_heuristic)
+        self.beta = float(beta)
+        if self.use_heuristic:
+            self.att_src = nn.Linear(in_dim, 1, bias=False)
+            self.att_dst = nn.Linear(in_dim, 1, bias=False)
 
     def forward(self, x, edge_index, tau):
         num_nodes = x.size(0)
@@ -408,7 +413,21 @@ class PheroConvSAGE(MessagePassing):
         incoming_mean = (incoming_sum / incoming_count).clamp_min(self.tau_eps)
         relative_tau = tau / incoming_mean[dst]
 
-        neigh = self.propagate(edge_index, x=self.lin_neigh(x), edge_weight=relative_tau)
+        if self.use_heuristic:
+            # ACO-style tau^1 * eta^beta combination (as in PheroConvV2's
+            # use_heuristic path) but kept on SAGE's mean-aggregation scale
+            # (normalized to mean ~1 per neighborhood) instead of a softmax,
+            # so it still composes with separate self/neighbor transforms.
+            att_logit = self.att_src(x)[src].squeeze(-1) + self.att_dst(x)[dst].squeeze(-1)
+            eta = F.softplus(F.leaky_relu(att_logit, 0.2)) + self.tau_eps
+            incoming_eta_sum = scatter(eta, dst, dim=0, dim_size=num_nodes, reduce="sum")
+            incoming_eta_mean = (incoming_eta_sum / incoming_count).clamp_min(self.tau_eps)
+            relative_eta = eta / incoming_eta_mean[dst]
+            edge_weight = relative_tau * relative_eta.pow(self.beta)
+        else:
+            edge_weight = relative_tau
+
+        neigh = self.propagate(edge_index, x=self.lin_neigh(x), edge_weight=edge_weight)
         return self.lin_self(x) + neigh
 
     def message(self, x_j, edge_weight):
@@ -419,10 +438,11 @@ class PheroSAGE(nn.Module):
     def __init__(self, in_dim, hidden, out_dim, dropout, num_edges,
                  tau0=1.0, tau_min=0.05, tau_max=5.0,
                  evaporation_rate=0.08, reinforcement_rate=0.35,
-                 credit_hops=1, credit_decay=0.5):
+                 credit_hops=1, credit_decay=0.5,
+                 use_heuristic=False, beta=0.5):
         super().__init__()
-        self.c1 = PheroConvSAGE(in_dim, hidden)
-        self.c2 = PheroConvSAGE(hidden, out_dim)
+        self.c1 = PheroConvSAGE(in_dim, hidden, use_heuristic, beta)
+        self.c2 = PheroConvSAGE(hidden, out_dim, use_heuristic, beta)
         self.dropout = float(dropout)
 
         self.tau0 = float(tau0)
@@ -578,6 +598,241 @@ class PheroEnsemble(nn.Module):
         return torch.log(probs.clamp_min(1e-12))
 
 
+class PheroSAGEAPPNP(nn.Module):
+    """Hybrid of PheroAPPNP and PheroSAGE: a shallow 2-layer MLP produces an
+    initial prediction, which is then diffused K hops with a teleport back to
+    it at every hop (as in PheroAPPNP) -- but through a row-stochastic
+    (mean-aggregation, GraphSAGE-style) pheromone-weighted propagation
+    instead of PheroAPPNP's GCN-style symmetric-normalized one. The idea is
+    to combine APPNP's larger receptive field (helps CiteSeer/PubMed) with
+    mean-aggregation's robustness to heterophily (helps Texas/Wisconsin/
+    Cornell, where PheroAPPNP's GCN-style propagation underperforms
+    GraphSAGE).
+    """
+
+    def __init__(self, in_dim, hidden, out_dim, dropout, num_edges,
+                 tau0=1.0, tau_min=0.05, tau_max=5.0,
+                 evaporation_rate=0.08, reinforcement_rate=0.35,
+                 credit_hops=1, credit_decay=0.5,
+                 K=10, appnp_alpha=0.1, tau_eps=1e-8):
+        super().__init__()
+        self.lin1 = nn.Linear(in_dim, hidden)
+        self.lin2 = nn.Linear(hidden, out_dim)
+        self.dropout = float(dropout)
+        self.K = int(K)
+        self.appnp_alpha = float(appnp_alpha)
+        self.tau_eps = float(tau_eps)
+
+        self.tau0 = float(tau0)
+        self.tau_min = float(tau_min)
+        self.tau_max = float(tau_max)
+        self.evaporation_rate = float(evaporation_rate)
+        self.reinforcement_rate = float(reinforcement_rate)
+        self.credit_hops = int(credit_hops)
+        self.credit_decay = float(credit_decay)
+
+        self.register_buffer("tau", torch.full((num_edges,), self.tau0))
+
+    def effective_tau(self):
+        return self.tau
+
+    def _mean_propagate(self, z, edge_index, tau):
+        num_nodes = z.size(0)
+        num_edges = edge_index.size(1)
+        edge_index_loop, _ = add_remaining_self_loops(edge_index, num_nodes=num_nodes)
+        added = edge_index_loop.size(1) - num_edges
+        if added:
+            loop_tau = torch.ones(added, device=tau.device, dtype=tau.dtype)
+            tau_loop = torch.cat([tau, loop_tau], dim=0)
+        else:
+            tau_loop = tau
+
+        src, dst = edge_index_loop
+        incoming_sum = scatter(tau_loop, dst, dim=0, dim_size=num_nodes, reduce="sum")
+        incoming_count = scatter(
+            torch.ones_like(tau_loop), dst, dim=0, dim_size=num_nodes, reduce="sum"
+        ).clamp_min(1.0)
+        incoming_mean = (incoming_sum / incoming_count).clamp_min(self.tau_eps)
+        relative_tau = tau_loop / incoming_mean[dst]
+
+        msg = z[src] * relative_tau.view(-1, 1)
+        return scatter(msg, dst, dim=0, dim_size=num_nodes, reduce="mean")
+
+    def forward(self, x, edge_index):
+        h = F.relu(self.lin1(x))
+        h = F.dropout(h, self.dropout, self.training)
+        h0 = self.lin2(h)
+        h0 = F.dropout(h0, self.dropout, self.training)
+
+        z = h0
+        for _ in range(self.K):
+            z = self._mean_propagate(z, edge_index, self.tau)
+            z = (1.0 - self.appnp_alpha) * z + self.appnp_alpha * h0
+        return z
+
+    @torch.no_grad()
+    def update_pheromones(self, logits, y, train_mask, edge_index):
+        if self.evaporation_rate > 0:
+            self.tau.mul_(1.0 - self.evaporation_rate).add_(self.evaporation_rate * self.tau0)
+
+        if self.reinforcement_rate > 0:
+            probs = torch.softmax(logits, dim=-1)
+            safe_y = y.clamp_min(0)
+            true_prob = probs.gather(1, safe_y.unsqueeze(1)).squeeze(1)
+            reward_node = torch.zeros(logits.size(0), device=logits.device, dtype=self.tau.dtype)
+            reward_node[train_mask] = 2.0 * true_prob[train_mask] - 1.0
+
+            src, dst = edge_index[0], edge_index[1]
+            num_nodes = logits.size(0)
+            current = reward_node
+            total_edge_reward = torch.zeros_like(self.tau)
+            for hop in range(max(1, self.credit_hops)):
+                total_edge_reward = total_edge_reward + (self.credit_decay ** hop) * current[dst]
+                if hop + 1 < self.credit_hops:
+                    current = scatter(current[dst], src, dim=0, dim_size=num_nodes, reduce="mean")
+            self.tau.add_(self.reinforcement_rate * total_edge_reward)
+
+        self.tau.clamp_(self.tau_min, self.tau_max)
+
+    def pheromone_statistics(self) -> Dict[str, float]:
+        tau = self.tau.detach()
+        return {
+            "tau_mean": tau.mean().item(),
+            "tau_std": tau.std(unbiased=False).item(),
+            "tau_min": tau.min().item(),
+            "tau_max": tau.max().item(),
+        }
+
+
+class PheroGCNIIConv(MessagePassing):
+    """One GCNII layer (Chen et al., ICML 2020): initial-residual connection
+    to the first-layer representation plus an identity-mapping-biased linear
+    transform, which together let GNNs go much deeper (8+ layers) without
+    oversmoothing -- unlike plain stacked GCNConv/PheroConv layers. The
+    propagation step uses the same pheromone-weighted GCN-style
+    normalization as PheroConv."""
+
+    def __init__(self, dim, alpha, beta, tau_eps=1e-8):
+        super().__init__(aggr="add", node_dim=0)
+        self.weight = nn.Linear(dim, dim, bias=False)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.tau_eps = float(tau_eps)
+
+    def forward(self, x, x0, edge_index, tau):
+        num_nodes = x.size(0)
+        num_edges = edge_index.size(1)
+        edge_index_loop, _ = add_remaining_self_loops(edge_index, num_nodes=num_nodes)
+        added = edge_index_loop.size(1) - num_edges
+        if added:
+            loop_tau = torch.ones(added, device=tau.device, dtype=tau.dtype)
+            tau_loop = torch.cat([tau, loop_tau], dim=0)
+        else:
+            tau_loop = tau
+
+        src, dst = edge_index_loop
+        incoming_sum = scatter(tau_loop, dst, dim=0, dim_size=num_nodes, reduce="sum")
+        incoming_count = scatter(
+            torch.ones_like(tau_loop), dst, dim=0, dim_size=num_nodes, reduce="sum"
+        ).clamp_min(1.0)
+        incoming_mean = (incoming_sum / incoming_count).clamp_min(self.tau_eps)
+        relative_tau = tau_loop / incoming_mean[dst]
+
+        degree = scatter(
+            torch.ones_like(relative_tau), dst, dim=0, dim_size=num_nodes, reduce="sum"
+        ).clamp_min(1.0)
+        degree_inv_sqrt = degree.pow(-0.5)
+        gcn_norm = degree_inv_sqrt[src] * degree_inv_sqrt[dst]
+        edge_weight = gcn_norm * relative_tau
+
+        propagated = self.propagate(edge_index_loop, x=x, edge_weight=edge_weight)
+        h = (1.0 - self.alpha) * propagated + self.alpha * x0
+        return (1.0 - self.beta) * h + self.beta * self.weight(h)
+
+    def message(self, x_j, edge_weight):
+        return x_j * edge_weight.view(-1, 1)
+
+
+class PheroGCNII(nn.Module):
+    """Deep PheroGNN using GCNII's initial-residual + identity-mapping trick
+    to go to `num_layers` (default 16) layers without oversmoothing, with
+    every layer's propagation weighted by the same persistent, evaporating/
+    reinforcing pheromone trail as the rest of the PheroGNN family. Tests
+    whether depth -- orthogonal to every mechanism tried so far, all of
+    which kept PheroConv's original 2-layer depth -- is itself a lever the
+    pheromone mechanism can exploit."""
+
+    def __init__(self, in_dim, hidden, out_dim, dropout, num_edges,
+                 tau0=1.0, tau_min=0.05, tau_max=5.0,
+                 evaporation_rate=0.08, reinforcement_rate=0.35,
+                 credit_hops=1, credit_decay=0.5,
+                 num_layers=16, gcnii_alpha=0.1, gcnii_lambda=0.5, tau_eps=1e-8):
+        super().__init__()
+        self.lin_in = nn.Linear(in_dim, hidden)
+        self.lin_out = nn.Linear(hidden, out_dim)
+        self.dropout = float(dropout)
+        self.convs = nn.ModuleList([
+            PheroGCNIIConv(hidden, gcnii_alpha, min(1.0, gcnii_lambda / (layer + 1)), tau_eps)
+            for layer in range(int(num_layers))
+        ])
+
+        self.tau0 = float(tau0)
+        self.tau_min = float(tau_min)
+        self.tau_max = float(tau_max)
+        self.evaporation_rate = float(evaporation_rate)
+        self.reinforcement_rate = float(reinforcement_rate)
+        self.credit_hops = int(credit_hops)
+        self.credit_decay = float(credit_decay)
+
+        self.register_buffer("tau", torch.full((num_edges,), self.tau0))
+
+    def effective_tau(self):
+        return self.tau
+
+    def forward(self, x, edge_index):
+        x = F.dropout(x, self.dropout, self.training)
+        x0 = F.relu(self.lin_in(x))
+        x0 = F.dropout(x0, self.dropout, self.training)
+        h = x0
+        for conv in self.convs:
+            h = conv(h, x0, edge_index, self.tau).relu()
+            h = F.dropout(h, self.dropout, self.training)
+        return self.lin_out(h)
+
+    @torch.no_grad()
+    def update_pheromones(self, logits, y, train_mask, edge_index):
+        if self.evaporation_rate > 0:
+            self.tau.mul_(1.0 - self.evaporation_rate).add_(self.evaporation_rate * self.tau0)
+
+        if self.reinforcement_rate > 0:
+            probs = torch.softmax(logits, dim=-1)
+            safe_y = y.clamp_min(0)
+            true_prob = probs.gather(1, safe_y.unsqueeze(1)).squeeze(1)
+            reward_node = torch.zeros(logits.size(0), device=logits.device, dtype=self.tau.dtype)
+            reward_node[train_mask] = 2.0 * true_prob[train_mask] - 1.0
+
+            src, dst = edge_index[0], edge_index[1]
+            num_nodes = logits.size(0)
+            current = reward_node
+            total_edge_reward = torch.zeros_like(self.tau)
+            for hop in range(max(1, self.credit_hops)):
+                total_edge_reward = total_edge_reward + (self.credit_decay ** hop) * current[dst]
+                if hop + 1 < self.credit_hops:
+                    current = scatter(current[dst], src, dim=0, dim_size=num_nodes, reduce="mean")
+            self.tau.add_(self.reinforcement_rate * total_edge_reward)
+
+        self.tau.clamp_(self.tau_min, self.tau_max)
+
+    def pheromone_statistics(self) -> Dict[str, float]:
+        tau = self.tau.detach()
+        return {
+            "tau_mean": tau.mean().item(),
+            "tau_std": tau.std(unbiased=False).item(),
+            "tau_min": tau.min().item(),
+            "tau_max": tau.max().item(),
+        }
+
+
 PHEROGNN_V7_VARIANTS = {
     "pherognn_v7_heuristic": dict(use_heuristic=True),
     "pherognn_v7_dual": dict(dual_pheromone=True),
@@ -623,7 +878,7 @@ def build_model(name, data, cfg):
             credit_decay=pheromone_cfg.get("credit_decay", 0.5),
         )
 
-    if name == "pherognn_sage":
+    if name in {"pherognn_sage", "pherognn_sage_heuristic"}:
         return PheroSAGE(
             *common,
             num_edges=data.edge_index.size(1),
@@ -634,6 +889,41 @@ def build_model(name, data, cfg):
             reinforcement_rate=pheromone_cfg.get("reinforcement_rate", 0.35),
             credit_hops=pheromone_cfg.get("credit_hops", 1),
             credit_decay=pheromone_cfg.get("credit_decay", 0.5),
+            use_heuristic=(name == "pherognn_sage_heuristic"),
+            beta=cfg.get("pheromone_v7", {}).get("beta", 0.5),
+        )
+
+    if name == "pherognn_sage_appnp":
+        appnp_cfg = cfg.get("pheromone_appnp", {})
+        return PheroSAGEAPPNP(
+            *common,
+            num_edges=data.edge_index.size(1),
+            tau0=appnp_cfg.get("tau0", pheromone_cfg.get("tau0", 1.0)),
+            tau_min=appnp_cfg.get("tau_min", pheromone_cfg.get("tau_min", 0.05)),
+            tau_max=appnp_cfg.get("tau_max", pheromone_cfg.get("tau_max", 5.0)),
+            evaporation_rate=appnp_cfg.get("evaporation_rate", pheromone_cfg.get("evaporation_rate", 0.08)),
+            reinforcement_rate=appnp_cfg.get("reinforcement_rate", pheromone_cfg.get("reinforcement_rate", 0.35)),
+            credit_hops=appnp_cfg.get("credit_hops", pheromone_cfg.get("credit_hops", 1)),
+            credit_decay=appnp_cfg.get("credit_decay", pheromone_cfg.get("credit_decay", 0.5)),
+            K=appnp_cfg.get("K", 10),
+            appnp_alpha=appnp_cfg.get("appnp_alpha", 0.1),
+        )
+
+    if name == "pherognn_gcnii":
+        gcnii_cfg = cfg.get("pheromone_gcnii", {})
+        return PheroGCNII(
+            *common,
+            num_edges=data.edge_index.size(1),
+            tau0=gcnii_cfg.get("tau0", pheromone_cfg.get("tau0", 1.0)),
+            tau_min=gcnii_cfg.get("tau_min", pheromone_cfg.get("tau_min", 0.05)),
+            tau_max=gcnii_cfg.get("tau_max", pheromone_cfg.get("tau_max", 5.0)),
+            evaporation_rate=gcnii_cfg.get("evaporation_rate", pheromone_cfg.get("evaporation_rate", 0.08)),
+            reinforcement_rate=gcnii_cfg.get("reinforcement_rate", pheromone_cfg.get("reinforcement_rate", 0.35)),
+            credit_hops=gcnii_cfg.get("credit_hops", pheromone_cfg.get("credit_hops", 1)),
+            credit_decay=gcnii_cfg.get("credit_decay", pheromone_cfg.get("credit_decay", 0.5)),
+            num_layers=gcnii_cfg.get("num_layers", 16),
+            gcnii_alpha=gcnii_cfg.get("gcnii_alpha", 0.1),
+            gcnii_lambda=gcnii_cfg.get("gcnii_lambda", 0.5),
         )
 
     if name in PHEROGNN_V7_VARIANTS:
